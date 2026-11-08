@@ -34,6 +34,28 @@ router.get(
   }
 );
 
+// GET /api/audit/verify - Cryptographic hash-chain integrity verification (ADMIN only)
+router.get(
+  '/verify',
+  authenticate,
+  requireRole('ADMIN'),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const verification = await auditService.verifyIntegrity();
+      res.status(200).json({
+        success: true,
+        verification,
+      });
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to verify audit ledger integrity',
+        error: error.message,
+      });
+    }
+  }
+);
+
 // GET /api/audit/export - Export audit logs to CSV (ADMIN only)
 router.get(
   '/export',
@@ -42,7 +64,7 @@ router.get(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const csv = await auditService.exportCsv();
-      const filename = `vaultguard_audit_export_${new Date().toISOString().slice(0, 10)}.csv`;
+      const filename = `vaultguard_audit_ledger_${new Date().toISOString().slice(0, 10)}.csv`;
 
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -54,4 +76,3 @@ router.get(
 );
 
 export default router;
-

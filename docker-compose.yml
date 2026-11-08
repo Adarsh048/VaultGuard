@@ -11,6 +11,14 @@ services:
       MONGO_INITDB_DATABASE: vaultguard
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - vaultguard-network
 
   vault:
     image: hashicorp/vault:1.15.6
@@ -19,19 +27,71 @@ services:
     ports:
       - "8200:8200"
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: root-master-token-vg2026
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:-root-master-token-vg2026}
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
       VAULT_ADDR: "http://127.0.0.1:8200"
     cap_add:
       - IPC_LOCK
     volumes:
-      - ./vault/config:/vault/config
-      - ./vault/policies:/vault/policies
+      - ./vault/config:/vault/config:ro
+      - ./vault/policies:/vault/policies:ro
       - ./vault/logs:/vault/logs
       - vault_data:/vault/data
-    command: ["server", "-dev", "-dev-root-token-id=root-master-token-vg2026", "-dev-listen-address=0.0.0.0:8200"]
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - vaultguard-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vaultguard-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      NODE_ENV: development
+      PORT: 5000
+      MONGO_URI: mongodb://mongodb:27017/vaultguard
+      JWT_SECRET: ${JWT_SECRET:-vaultguard-super-secure-jwt-secret-key-2026-production-grade}
+      VAULT_ADDR: http://vault:8200
+      VAULT_APP_TOKEN: ${VAULT_APP_TOKEN:-}
+      VAULT_KV_MOUNT: secret
+      VAULT_AUDIT_LOG_PATH: /vault/logs/vault_audit.log
+      CORS_ORIGIN: http://localhost:5173
+    volumes:
+      - ./vault/logs:/vault/logs:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+    networks:
+      - vaultguard-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vaultguard-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - vaultguard-network
+
+networks:
+  vaultguard-network:
+    driver: bridge
 
 volumes:
   mongo_data:
   vault_data:
-

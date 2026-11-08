@@ -5,17 +5,13 @@ import { Badge } from '../components/common/Badge';
 import { Alert } from '../components/common/Alert';
 import {
   Activity,
-  ShieldCheck,
-  ShieldAlert,
-  AlertCircle,
-  RefreshCw,
   HardDrive,
   FileText,
   Key,
-  Clock,
   CheckCircle2,
   XCircle,
-  Database,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
 
 export const Monitoring: React.FC = () => {
@@ -60,6 +56,12 @@ export const Monitoring: React.FC = () => {
             Warning / Standby
           </Badge>
         );
+      case 'Not Configured':
+        return (
+          <Badge variant="neutral" size="md">
+            Not Configured
+          </Badge>
+        );
       default:
         return (
           <Badge variant="danger" size="md">
@@ -72,7 +74,7 @@ export const Monitoring: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       <Header
-        title="Vault Health & Infrastructure Monitoring"
+        title="Vault Health & Infrastructure Telemetry"
         subtitle="Real-time telemetry and operational status of HashiCorp Vault Community Edition."
         actions={
           <button
@@ -158,22 +160,30 @@ export const Monitoring: React.FC = () => {
             {/* Audit Device Logging */}
             <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
               <div className="flex items-center justify-between text-xs mb-2">
-                <span className="text-slate-500 font-medium">Vault Audit Device</span>
+                <span className="text-slate-500 font-medium">Vault File Audit Device</span>
                 <FileText className="h-4 w-4 text-slate-400" />
               </div>
               <div className="text-sm font-bold text-slate-900">
-                {data?.auditLogging?.enabled ? (
+                {data?.auditLogging?.status === 'Healthy' ? (
                   <span className="text-emerald-600 flex items-center gap-1">
-                    <CheckCircle2 className="h-4 w-4" /> Active (file/)
+                    <CheckCircle2 className="h-4 w-4" /> Healthy (file/)
+                  </span>
+                ) : data?.auditLogging?.status === 'Warning' ? (
+                  <span className="text-amber-600 flex items-center gap-1">
+                    <AlertCircle className="h-4 w-4" /> Empty File
+                  </span>
+                ) : data?.auditLogging?.status === 'Not Configured' ? (
+                  <span className="text-slate-500 flex items-center gap-1">
+                    Not Configured
                   </span>
                 ) : (
-                  <span className="text-amber-600 flex items-center gap-1">
-                    <AlertCircle className="h-4 w-4" /> Inactive
+                  <span className="text-rose-600 flex items-center gap-1">
+                    <XCircle className="h-4 w-4" /> File Unavailable
                   </span>
                 )}
               </div>
-              <p className="text-[11px] text-slate-400 mt-1 font-mono">
-                Log size: {data?.auditLogging?.logSizeBytes ? `${(data.auditLogging.logSizeBytes / 1024).toFixed(1)} KB` : '0 KB'}
+              <p className="text-[11px] text-slate-400 mt-1 font-mono truncate" title={data?.auditLogging?.configuredPath}>
+                Size: {data?.auditLogging?.logSizeBytes ? `${(data.auditLogging.logSizeBytes / 1024).toFixed(1)} KB` : '0 KB'}
               </p>
             </div>
 
@@ -198,7 +208,7 @@ export const Monitoring: React.FC = () => {
           <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
             <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
               <AlertCircle className="h-4 w-4 text-rose-600" />
-              <span>Recent Security Monitoring & Denial Events</span>
+              <span>Security Denial & Access Failure Events</span>
             </h4>
             <span className="text-xs text-slate-400">Streamed from live audit ledger</span>
           </div>
@@ -207,6 +217,7 @@ export const Monitoring: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/75 text-slate-500 uppercase tracking-wider font-semibold">
+                  <th className="py-3 px-4"># Seq</th>
                   <th className="py-3 px-4">Timestamp</th>
                   <th className="py-3 px-4">Event Type</th>
                   <th className="py-3 px-4">Subject User</th>
@@ -219,6 +230,9 @@ export const Monitoring: React.FC = () => {
                 {events.length > 0 ? (
                   events.map((evt) => (
                     <tr key={evt._id} className="hover:bg-slate-50 transition">
+                      <td className="py-3 px-4 font-mono font-bold text-slate-600">
+                        #{evt.sequenceNumber}
+                      </td>
                       <td className="py-3.5 px-4 font-mono text-slate-500">
                         {new Date(evt.timestamp).toLocaleString()}
                       </td>
@@ -241,7 +255,7 @@ export const Monitoring: React.FC = () => {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-slate-400">
+                    <td colSpan={7} className="py-8 text-center text-slate-400">
                       No security exceptions or denial events detected.
                     </td>
                   </tr>
@@ -254,4 +268,3 @@ export const Monitoring: React.FC = () => {
     </div>
   );
 };
-

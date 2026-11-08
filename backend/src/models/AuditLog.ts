@@ -3,6 +3,7 @@ import mongoose, { Document, Schema, Types } from 'mongoose';
 export type AuditResult = 'SUCCESS' | 'FAILURE' | 'DENIED';
 
 export interface IAuditLog extends Document {
+  sequenceNumber: number;
   userId: Types.ObjectId | null;
   username: string;
   action: string;
@@ -11,10 +12,18 @@ export interface IAuditLog extends Document {
   ipAddress: string;
   metadata: Record<string, any>;
   timestamp: Date;
+  previousHash: string;
+  hash: string;
 }
 
 const AuditLogSchema = new Schema<IAuditLog>(
   {
+    sequenceNumber: {
+      type: Number,
+      required: true,
+      unique: true,
+      index: true,
+    },
     userId: {
       type: Schema.Types.ObjectId,
       ref: 'User',
@@ -56,6 +65,15 @@ const AuditLogSchema = new Schema<IAuditLog>(
       default: Date.now,
       index: true,
     },
+    previousHash: {
+      type: String,
+      required: true,
+    },
+    hash: {
+      type: String,
+      required: true,
+      index: true,
+    },
   },
   {
     timestamps: false,
@@ -63,8 +81,7 @@ const AuditLogSchema = new Schema<IAuditLog>(
   }
 );
 
-// Index for audit filtering and chronological sorting
+// Indexes for audit filtering and chronology
 AuditLogSchema.index({ timestamp: -1, action: 1 });
 
 export const AuditLog = mongoose.model<IAuditLog>('AuditLog', AuditLogSchema);
-

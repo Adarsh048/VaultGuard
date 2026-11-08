@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import { config } from './config/env';
 import { apiGeneralLimiter } from './middlewares/rateLimiter';
 import { errorHandler } from './middlewares/errorHandler';
+import { csrfProtection } from './middlewares/csrf';
 
 import authRoutes from './routes/auth.routes';
 import accountsRoutes from './routes/accounts.routes';
@@ -19,20 +20,31 @@ import dashboardRoutes from './routes/dashboard.routes';
 
 const app = express();
 
-// Security middlewares
+// Security headers with Helmet
 app.use(helmet());
+
+// CORS configuration with credentials support
 app.use(
   cors({
     origin: config.corsOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'X-CSRF-Token',
+      'X-XSRF-Token',
+    ],
   })
 );
 
 app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Apply CSRF protection for state-changing requests
+app.use(csrfProtection);
 
 if (config.nodeEnv !== 'test') {
   app.use(morgan('dev'));
@@ -61,8 +73,7 @@ app.use('/api/incidents', incidentsRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 
-// Error Handler
+// Centralized Error Handler
 app.use(errorHandler);
 
 export default app;
-

@@ -8,7 +8,7 @@ import { incidentService } from './incident.service';
 
 export class RotationService {
   /**
-   * Secure password generator with high entropy (24 characters)
+   * Secure password generator with high cryptographic entropy
    */
   generateSecurePassword(length = 24): string {
     const uppercase = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -18,7 +18,7 @@ export class RotationService {
     const all = uppercase + lowercase + numbers + symbols;
 
     let password = '';
-    // Ensure at least one character from each character category
+    // Ensure at least one character from each set
     password += uppercase[crypto.randomInt(uppercase.length)];
     password += lowercase[crypto.randomInt(lowercase.length)];
     password += numbers[crypto.randomInt(numbers.length)];
@@ -36,13 +36,17 @@ export class RotationService {
   }
 
   /**
-   * Execute credential rotation for a privileged account
-   * Distinguishes: Vault secret update vs Target password change vs Verification vs Reconciliation
+   * Execute credential rotation for a privileged account.
+   *
+   * TECHNICAL DISTINCTION:
+   * 1. Vault Secret Update: Updates the KV v2 secret in HashiCorp Vault and verifies it.
+   * 2. Target Account Password Rotation: Explicitly marked as NOT_IMPLEMENTED.
+   *    In enterprise PAM (e.g. CyberArk CPM), target password rotation requires remote agents,
+   *    WMI/RPC for Windows, or SSH keys for Linux. Updating Vault does NOT change target OS password.
    */
   async rotate(
     accountId: string,
-    adminUser: { _id: Types.ObjectId; name: string },
-    strictHostVerification = false
+    adminUser: { _id: Types.ObjectId; name: string }
   ) {
     const account = await PrivilegedAccount.findById(accountId);
     if (!account) {
@@ -51,15 +55,10 @@ export class RotationService {
 
     const newPassword = this.generateSecurePassword(24);
     let vaultUpdated = false;
-    let targetChanged = false;
     let verified = false;
-    let reconciliationNotes = '';
+    let vaultVersion = 1;
 
     try {
-      if (strictHostVerification) {
-        throw new Error(`Target host ${account.hostname} remote connection timed out during network reconciliation`);
-      }
-
       // Step 1: Update HashiCorp Vault KV v2 secret
       const vaultResult = await vaultService.storeSecret(account.vaultSecretPath, {
         username: account.username,
@@ -69,19 +68,21 @@ export class RotationService {
         rotatedBy: adminUser.name,
       });
       vaultUpdated = true;
+      vaultVersion = vaultResult.version;
 
-      // Step 2: Target Account Password Reconciliation
-      targetChanged = true;
-
-      // Step 3: Verification of secret stored in Vault
+      // Step 2: Verification of secret stored in Vault (without printing password)
       const checkSecret = await vaultService.getSecret(account.vaultSecretPath);
       if (checkSecret.password === newPassword) {
         verified = true;
       } else {
-        throw new Error('Vault post-rotation verification check failed');
+        throw new Error('Vault post-rotation verification check failed: secret mismatch');
       }
 
-      reconciliationNotes = `Secret successfully rotated in HashiCorp Vault KV v2 (Version ${vaultResult.version}). Target ${account.accountType} (${account.hostname}) reconciled and verified.`;
+      // Step 3: Target Account Password Status
+      // Strictly honest: We do not connect to Windows/Linux endpoints to change OS passwords.
+      const targetPasswordChanged = false;
+      const targetStatus = 'NOT_IMPLEMENTED';
+      const reconciliationNotes = `Vault KV v2 secret updated to Version ${vaultVersion} and verified. Target ${account.accountType} (${account.hostname}) endpoint password rotation is NOT_IMPLEMENTED (requires remote agent or SSH/WMI connection plugin).`;
 
       // Update account status in MongoDB
       account.rotationStatus = 'synced';
@@ -96,14 +97,16 @@ export class RotationService {
         status: 'SUCCESS',
         targetAccountType: account.accountType,
         vaultSecretUpdated: vaultUpdated,
-        targetPasswordChanged: targetChanged,
+        vaultSecretVersion: vaultVersion,
+        targetPasswordChanged,
+        targetStatus,
         passwordVerified: verified,
         reconciliationNotes,
         failureReason: null,
         timestamp: new Date(),
       });
 
-      // Audit log
+      // Audit log (never log the password!)
       await auditService.log({
         userId: adminUser._id,
         username: adminUser.name,
@@ -114,18 +117,21 @@ export class RotationService {
           accountName: account.accountName,
           accountType: account.accountType,
           vaultSecretUpdated: true,
-          vaultVersion: vaultResult.version,
+          vaultVersion,
+          targetStatus: 'NOT_IMPLEMENTED',
         },
       });
 
       return {
         success: true,
-        message: 'Credential rotation completed and verified successfully',
+        message: 'Vault secret updated and verified. Target OS password change is NOT_IMPLEMENTED.',
+        vaultVersion,
+        targetStatus: 'NOT_IMPLEMENTED',
         history,
       };
     } catch (err: any) {
-      const failureReason = err.message || 'Rotation failed';
-      reconciliationNotes = `Rotation failed during execution. Vault updated: ${vaultUpdated}. Target changed: ${targetChanged}.`;
+      const failureReason = err.message || 'Vault secret update failed';
+      const reconciliationNotes = `Rotation failed during Vault update: ${failureReason}`;
 
       account.rotationStatus = 'failed';
       await account.save();
@@ -137,7 +143,9 @@ export class RotationService {
         status: 'FAILED',
         targetAccountType: account.accountType,
         vaultSecretUpdated: vaultUpdated,
-        targetPasswordChanged: targetChanged,
+        vaultSecretVersion: vaultVersion,
+        targetPasswordChanged: false,
+        targetStatus: 'FAILED',
         passwordVerified: verified,
         reconciliationNotes,
         failureReason,

@@ -30,14 +30,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await api.get('/auth/me');
       if (res.data?.success && res.data?.user) {
         setUser(res.data.user);
-        localStorage.setItem('vaultguard_user', JSON.stringify(res.data.user));
       } else {
         setUser(null);
-        localStorage.removeItem('vaultguard_user');
       }
     } catch {
       setUser(null);
-      localStorage.removeItem('vaultguard_user');
     } finally {
       setLoading(false);
     }
@@ -51,7 +48,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const res = await api.post('/auth/login', { email, password });
     if (res.data?.success && res.data?.user) {
       setUser(res.data.user);
-      localStorage.setItem('vaultguard_user', JSON.stringify(res.data.user));
     }
   };
 
@@ -59,10 +55,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await api.post('/auth/logout');
     } catch (err) {
-      console.warn('Logout API error:', err);
+      console.warn('Logout error:', err);
     } finally {
       setUser(null);
-      localStorage.removeItem('vaultguard_user');
       window.location.href = '/login';
     }
   };
@@ -91,4 +86,3 @@ export const useAuth = () => {
   }
   return context;
 };
-

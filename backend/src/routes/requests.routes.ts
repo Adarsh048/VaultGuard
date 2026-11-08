@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { Types } from 'mongoose';
+import mongoose, { Types } from 'mongoose';
 import { authenticate, AuthenticatedRequest } from '../middlewares/auth';
 import { requireRole } from '../middlewares/rbac';
 import { AccessRequest } from '../models/AccessRequest';
@@ -29,6 +29,11 @@ router.post(
       }
 
       const { accountId, justification, requestedDuration } = parseResult.data;
+
+      if (!mongoose.Types.ObjectId.isValid(accountId)) {
+        res.status(400).json({ success: false, message: 'Invalid target account ID format' });
+        return;
+      }
 
       const account = await PrivilegedAccount.findById(accountId);
       if (!account) {
@@ -94,7 +99,7 @@ router.get(
   }
 );
 
-// GET /api/requests/my - List current user's requests and grants
+// GET /api/requests/my - List current user's requests and active grants
 router.get(
   '/my',
   authenticate,
@@ -112,7 +117,7 @@ router.get(
           .lean(),
       ]);
 
-      // Automatically flag expired grants
+      // Automatically identify expired grants
       const now = new Date();
       const updatedGrants = grants.map((g: any) => {
         if (g.status === 'Active' && new Date(g.expiresAt) <= now) {
@@ -132,32 +137,38 @@ router.get(
   }
 );
 
-// PATCH /api/requests/:id/approve - Approve access request (ADMIN only)
+// PATCH /api/requests/:id/approve - Approve access request (ADMIN only, race-protected)
 router.patch(
   '/:id/approve',
   authenticate,
   requireRole('ADMIN'),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      if (typeof req.params.id !== 'string' || !mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ success: false, message: 'Invalid request ID format' });
+        return;
+      }
+
       const parseResult = reviewRequestSchema.safeParse(req.body);
       const approvalComment = parseResult.success ? parseResult.data.approvalComment : '';
 
-      const request = await AccessRequest.findById(req.params.id).populate('accountId');
-      if (!request) {
+      // Check existing request state
+      const existingRequest = await AccessRequest.findById(req.params.id);
+      if (!existingRequest) {
         res.status(404).json({ success: false, message: 'Access request not found' });
         return;
       }
 
-      if (request.status !== 'Pending') {
+      if (existingRequest.status !== 'Pending') {
         res.status(400).json({
           success: false,
-          message: `Cannot approve request with current status '${request.status}'`,
+          message: `Cannot approve request with current status '${existingRequest.status}'`,
         });
         return;
       }
 
       // Security requirement: Prevent self-approval
-      if (request.requesterId.toString() === req.user?._id.toString()) {
+      if (existingRequest.requesterId.toString() === req.user?._id.toString()) {
         res.status(403).json({
           success: false,
           message: 'Self-approval violation: Administrators are strictly forbidden from approving their own access requests.',
@@ -165,46 +176,61 @@ router.patch(
         return;
       }
 
-      const now = new Date();
-      const expiresAt = new Date(now.getTime() + request.requestedDuration * 60 * 1000);
+      // Atomic state transition: Ensure only one concurrent admin approval succeeds
+      const updatedRequest = await AccessRequest.findOneAndUpdate(
+        { _id: req.params.id, status: 'Pending' },
+        {
+          $set: {
+            status: 'Approved',
+            reviewedBy: req.user?._id,
+            approvalComment: approvalComment || 'Approved by administrator',
+          },
+        },
+        { new: true }
+      ).populate('accountId');
 
-      // Create AccessGrant
+      if (!updatedRequest) {
+        res.status(409).json({
+          success: false,
+          message: 'Concurrent approval conflict: Request was already processed by another administrator.',
+        });
+        return;
+      }
+
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + updatedRequest.requestedDuration * 60 * 1000);
+
+      // Create AccessGrant linked to approved request
       const grant = await AccessGrant.create({
-        userId: request.requesterId,
-        accountId: request.accountId,
-        requestId: request._id,
+        userId: updatedRequest.requesterId,
+        accountId: updatedRequest.accountId,
+        requestId: updatedRequest._id,
         approvedBy: req.user?._id,
         expiresAt,
         status: 'Active',
       });
-
-      // Update request status
-      request.status = 'Approved';
-      request.reviewedBy = (req.user?._id as Types.ObjectId) || null;
-      request.approvalComment = approvalComment || 'Approved by administrator';
-      await request.save();
 
       // Audit log
       await auditService.log({
         userId: req.user?._id,
         username: req.user?.name || 'ADMIN',
         action: 'ACCESS_REQUEST_APPROVED',
-        accountId: request.accountId._id,
+        accountId: (updatedRequest.accountId as any)._id,
         result: 'SUCCESS',
         ipAddress: req.ip || '127.0.0.1',
         metadata: {
-          requestId: request._id,
+          requestId: updatedRequest._id,
           grantId: grant._id,
-          targetUserId: request.requesterId,
+          targetUserId: updatedRequest.requesterId,
           expiresAt: expiresAt.toISOString(),
-          durationMinutes: request.requestedDuration,
+          durationMinutes: updatedRequest.requestedDuration,
         },
       });
 
       res.status(200).json({
         success: true,
         message: 'Access request approved. Temporary access grant activated.',
-        request,
+        request: updatedRequest,
         grant,
       });
     } catch (error: any) {
@@ -213,52 +239,58 @@ router.patch(
   }
 );
 
-// PATCH /api/requests/:id/reject - Reject access request (ADMIN only)
+// PATCH /api/requests/:id/reject - Reject access request (ADMIN only, race-protected)
 router.patch(
   '/:id/reject',
   authenticate,
   requireRole('ADMIN'),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      if (typeof req.params.id !== 'string' || !mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ success: false, message: 'Invalid request ID format' });
+        return;
+      }
+
       const parseResult = reviewRequestSchema.safeParse(req.body);
       const approvalComment = parseResult.success ? parseResult.data.approvalComment : '';
 
-      const request = await AccessRequest.findById(req.params.id);
-      if (!request) {
-        res.status(404).json({ success: false, message: 'Access request not found' });
-        return;
-      }
+      const updatedRequest = await AccessRequest.findOneAndUpdate(
+        { _id: req.params.id, status: 'Pending' },
+        {
+          $set: {
+            status: 'Rejected',
+            reviewedBy: req.user?._id,
+            approvalComment: approvalComment || 'Rejected by administrator',
+          },
+        },
+        { new: true }
+      );
 
-      if (request.status !== 'Pending') {
+      if (!updatedRequest) {
         res.status(400).json({
           success: false,
-          message: `Cannot reject request with current status '${request.status}'`,
+          message: 'Access request not found or already processed.',
         });
         return;
       }
-
-      request.status = 'Rejected';
-      request.reviewedBy = (req.user?._id as Types.ObjectId) || null;
-      request.approvalComment = approvalComment || 'Rejected by administrator';
-      await request.save();
 
       await auditService.log({
         userId: req.user?._id,
         username: req.user?.name || 'ADMIN',
         action: 'ACCESS_REQUEST_REJECTED',
-        accountId: request.accountId,
+        accountId: updatedRequest.accountId,
         result: 'SUCCESS',
         ipAddress: req.ip || '127.0.0.1',
         metadata: {
-          requestId: request._id,
-          reason: request.approvalComment,
+          requestId: updatedRequest._id,
+          reason: updatedRequest.approvalComment,
         },
       });
 
       res.status(200).json({
         success: true,
         message: 'Access request rejected',
-        request,
+        request: updatedRequest,
       });
     } catch (error: any) {
       res.status(500).json({ success: false, message: 'Failed to reject request' });
@@ -266,13 +298,18 @@ router.patch(
   }
 );
 
-// PATCH /api/requests/:id/revoke - Revoke active access (ADMIN only)
+// PATCH /api/requests/:id/revoke - Revoke active access grant immediately (ADMIN only)
 router.patch(
   '/:id/revoke',
   authenticate,
   requireRole('ADMIN'),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      if (typeof req.params.id !== 'string' || !mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ success: false, message: 'Invalid request ID format' });
+        return;
+      }
+
       const request = await AccessRequest.findById(req.params.id);
       if (!request) {
         res.status(404).json({ success: false, message: 'Access request not found' });

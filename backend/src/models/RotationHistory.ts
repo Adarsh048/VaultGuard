@@ -1,5 +1,7 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 
+export type TargetRotationStatus = 'NOT_IMPLEMENTED' | 'NOT_ATTEMPTED' | 'FAILED';
+
 export interface IRotationHistory extends Document {
   accountId: Types.ObjectId;
   accountName: string;
@@ -7,7 +9,9 @@ export interface IRotationHistory extends Document {
   status: 'SUCCESS' | 'FAILED';
   targetAccountType: string;
   vaultSecretUpdated: boolean;
+  vaultSecretVersion?: number;
   targetPasswordChanged: boolean;
+  targetStatus: TargetRotationStatus;
   passwordVerified: boolean;
   reconciliationNotes: string;
   failureReason: string | null;
@@ -44,9 +48,18 @@ const RotationHistorySchema = new Schema<IRotationHistory>(
       type: Boolean,
       default: false,
     },
+    vaultSecretVersion: {
+      type: Number,
+      default: 1,
+    },
     targetPasswordChanged: {
       type: Boolean,
-      default: false,
+      default: false, // In local architecture, target OS password change is not performed
+    },
+    targetStatus: {
+      type: String,
+      enum: ['NOT_IMPLEMENTED', 'NOT_ATTEMPTED', 'FAILED'],
+      default: 'NOT_IMPLEMENTED',
     },
     passwordVerified: {
       type: Boolean,
@@ -76,4 +89,3 @@ export const RotationHistory = mongoose.model<IRotationHistory>(
   'RotationHistory',
   RotationHistorySchema
 );
-

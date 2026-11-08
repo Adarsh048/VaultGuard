@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import mongoose from 'mongoose';
 import { authenticate, AuthenticatedRequest } from '../middlewares/auth';
 import { requireRole } from '../middlewares/rbac';
 import { rotationService } from '../services/rotation.service';
@@ -13,20 +14,16 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const accountId = req.params.accountId as string;
-      const strictHostVerification = Boolean(
-        req.body?.strictHostVerification ||
-          req.body?.simulateFailure ||
-          req.query?.strictHostVerification === 'true'
-      );
 
-      const result = await rotationService.rotate(
-        accountId,
-        {
-          _id: req.user!._id,
-          name: req.user!.name,
-        },
-        strictHostVerification
-      );
+      if (typeof accountId !== 'string' || !mongoose.Types.ObjectId.isValid(accountId)) {
+        res.status(400).json({ success: false, message: 'Invalid account ID format' });
+        return;
+      }
+
+      const result = await rotationService.rotate(accountId, {
+        _id: req.user!._id,
+        name: req.user!.name,
+      });
 
       res.status(200).json(result);
     } catch (error: any) {
@@ -46,6 +43,12 @@ router.get(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const accountId = req.query.accountId as string | undefined;
+
+      if (accountId && !mongoose.Types.ObjectId.isValid(accountId)) {
+        res.status(400).json({ success: false, message: 'Invalid account ID format' });
+        return;
+      }
+
       const history = await rotationService.getHistory(accountId);
 
       res.status(200).json({

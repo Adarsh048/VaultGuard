@@ -2,16 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { Header } from '../components/Layout/Header';
 import { api } from '../api/client';
 import { Badge } from '../components/common/Badge';
+import { Alert } from '../components/common/Alert';
 import {
   ScrollText,
   Download,
   Search,
-  Filter,
-  Calendar,
-  CheckCircle2,
-  XCircle,
-  AlertTriangle,
   RefreshCw,
+  ShieldCheck,
+  ShieldAlert,
+  Link2,
 } from 'lucide-react';
 
 export const AuditLogs: React.FC = () => {
@@ -25,6 +24,10 @@ export const AuditLogs: React.FC = () => {
   const [resultFilter, setResultFilter] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+
+  // Hash-Chain Integrity Verification State
+  const [verifying, setVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<any>(null);
 
   const fetchLogs = async () => {
     setLoading(true);
@@ -45,6 +48,24 @@ export const AuditLogs: React.FC = () => {
       console.error('Error fetching audit records:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleVerifyChain = async () => {
+    setVerifying(true);
+    setVerificationResult(null);
+    try {
+      const res = await api.get('/audit/verify');
+      if (res.data?.success) {
+        setVerificationResult(res.data.verification);
+      }
+    } catch (err: any) {
+      setVerificationResult({
+        valid: false,
+        details: err.response?.data?.message || 'Verification check failed',
+      });
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -70,20 +91,44 @@ export const AuditLogs: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       <Header
-        title="Immutable Audit & Compliance Ledger"
-        subtitle="Forensic audit logging for access governance, compliance oversight, and threat auditing."
+        title="Application Audit Ledger & Cryptographic Hash Chain"
+        subtitle="Forensic audit logging with SHA-256 tamper-evident hash chaining."
         actions={
-          <button
-            onClick={handleExportCsv}
-            className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-sky-700 transition"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Export CSV Report</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleVerifyChain}
+              disabled={verifying}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 transition disabled:opacity-50"
+            >
+              <Link2 className={`h-3.5 w-3.5 ${verifying ? 'animate-spin' : 'text-sky-600'}`} />
+              <span>{verifying ? 'Verifying Chain...' : 'Verify Hash Chain'}</span>
+            </button>
+            <button
+              onClick={handleExportCsv}
+              className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-sky-700 transition"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export CSV</span>
+            </button>
+          </div>
         }
       />
 
       <div className="flex-1 overflow-y-auto p-8 space-y-6">
+        {/* Verification Result Banner */}
+        {verificationResult && (
+          <Alert
+            type={verificationResult.valid ? 'success' : 'error'}
+            title={
+              verificationResult.valid
+                ? 'Cryptographic Hash Chain Verified'
+                : 'Integrity Violation Detected'
+            }
+          >
+            {verificationResult.details} (Verified: {verificationResult.totalChecked} records)
+          </Alert>
+        )}
+
         {/* Filtering Bar */}
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -117,6 +162,7 @@ export const AuditLogs: React.FC = () => {
                 <option value="LOGIN_SUCCESS">LOGIN_SUCCESS</option>
                 <option value="LOGIN_FAILURE">LOGIN_FAILURE</option>
                 <option value="ACCOUNT_ONBOARDED">ACCOUNT_ONBOARDED</option>
+                <option value="ACCOUNT_UPDATED">ACCOUNT_UPDATED</option>
                 <option value="CREDENTIAL_RETRIEVED">CREDENTIAL_RETRIEVED</option>
                 <option value="CREDENTIAL_RETRIEVAL_DENIED">CREDENTIAL_RETRIEVAL_DENIED</option>
                 <option value="ACCESS_REQUEST_SUBMITTED">ACCESS_REQUEST_SUBMITTED</option>
@@ -173,13 +219,13 @@ export const AuditLogs: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/75 text-slate-500 uppercase tracking-wider font-semibold">
-                  <th className="py-3 px-4">Event ID</th>
+                  <th className="py-3 px-4"># Seq</th>
                   <th className="py-3 px-4">Timestamp</th>
                   <th className="py-3 px-4">Actor</th>
                   <th className="py-3 px-4">PAM Action</th>
-                  <th className="py-3 px-4">Related Account</th>
+                  <th className="py-3 px-4">Target Resource</th>
                   <th className="py-3 px-4">Result</th>
-                  <th className="py-3 px-4">IP Address</th>
+                  <th className="py-3 px-4">SHA-256 Hash</th>
                   <th className="py-3 px-4">Metadata</th>
                 </tr>
               </thead>
@@ -187,8 +233,8 @@ export const AuditLogs: React.FC = () => {
                 {logs.length > 0 ? (
                   logs.map((log) => (
                     <tr key={log._id} className="hover:bg-slate-50 transition">
-                      <td className="py-3 px-4 font-mono text-[10px] text-slate-400">
-                        {log._id.slice(-6)}
+                      <td className="py-3 px-4 font-mono font-bold text-slate-600">
+                        #{log.sequenceNumber}
                       </td>
                       <td className="py-3 px-4 font-mono text-slate-600 text-[11px]">
                         {new Date(log.timestamp).toLocaleString()}
@@ -201,7 +247,9 @@ export const AuditLogs: React.FC = () => {
                         {log.accountId?.accountName || 'N/A'}
                       </td>
                       <td className="py-3 px-4">{getResultBadge(log.result)}</td>
-                      <td className="py-3 px-4 font-mono text-slate-500">{log.ipAddress}</td>
+                      <td className="py-3 px-4 font-mono text-[10px] text-slate-500" title={`Hash: ${log.hash}\nPrev: ${log.previousHash}`}>
+                        {log.hash ? `${log.hash.slice(0, 10)}...` : 'N/A'}
+                      </td>
                       <td className="py-3 px-4 max-w-xs truncate font-mono text-[10px] text-slate-500" title={JSON.stringify(log.metadata)}>
                         {JSON.stringify(log.metadata)}
                       </td>
@@ -222,4 +270,3 @@ export const AuditLogs: React.FC = () => {
     </div>
   );
 };
-

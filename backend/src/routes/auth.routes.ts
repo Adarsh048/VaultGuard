@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { config } from '../config/env';
 import { User } from '../models/User';
 import { loginSchema } from '../validations/auth.validation';
@@ -64,19 +65,30 @@ router.post('/login', authLimiter, async (req: AuthenticatedRequest, res: Respon
       return;
     }
 
-    // Sign JWT
+    // Sign JWT with strong secret
     const token = jwt.sign(
       { userId: user._id, role: user.role, email: user.email },
       config.jwtSecret,
       { expiresIn: '8h' }
     );
 
-    // Set HTTP-only secure cookie
+    // Cryptographically secure random CSRF token
+    const csrfToken = crypto.randomBytes(32).toString('hex');
+
+    // Set HTTP-only secure authentication cookie
     res.cookie('vaultguard_token', token, {
       httpOnly: true,
       secure: config.nodeEnv === 'production',
-      sameSite: 'lax',
+      sameSite: config.cookieSameSite,
       maxAge: 8 * 60 * 60 * 1000, // 8 hours
+    });
+
+    // Set CSRF protection cookie (readable by frontend client to attach as X-CSRF-Token)
+    res.cookie('vaultguard_csrf', csrfToken, {
+      httpOnly: false,
+      secure: config.nodeEnv === 'production',
+      sameSite: config.cookieSameSite,
+      maxAge: 8 * 60 * 60 * 1000,
     });
 
     await auditService.log({
@@ -88,9 +100,11 @@ router.post('/login', authLimiter, async (req: AuthenticatedRequest, res: Respon
       metadata: { role: user.role },
     });
 
+    // CRITICAL SECURITY FIX: Do not include JWT token in JSON response body.
+    // Authentication relies exclusively on HTTP-only cookies.
     res.status(200).json({
       success: true,
-      token, // Also provide in response body for flexible client usage
+      csrfToken,
       user: {
         id: user._id,
         name: user.name,
@@ -120,7 +134,13 @@ router.post('/logout', authenticate, async (req: AuthenticatedRequest, res: Resp
     res.clearCookie('vaultguard_token', {
       httpOnly: true,
       secure: config.nodeEnv === 'production',
-      sameSite: 'lax',
+      sameSite: config.cookieSameSite,
+    });
+
+    res.clearCookie('vaultguard_csrf', {
+      httpOnly: false,
+      secure: config.nodeEnv === 'production',
+      sameSite: config.cookieSameSite,
     });
 
     res.status(200).json({ success: true, message: 'Successfully logged out' });
@@ -150,4 +170,3 @@ router.get('/me', authenticate, async (req: AuthenticatedRequest, res: Response)
 });
 
 export default router;
-

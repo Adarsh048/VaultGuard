@@ -1,10 +1,10 @@
 import { Router, Response } from 'express';
 import fs from 'fs';
-import path from 'path';
 import { authenticate, AuthenticatedRequest } from '../middlewares/auth';
 import { requireRole } from '../middlewares/rbac';
 import { vaultService } from '../services/vault.service';
 import { AuditLog } from '../models/AuditLog';
+import { config } from '../config/env';
 
 const router = Router();
 
@@ -15,30 +15,39 @@ router.get(
   requireRole('ADMIN'),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      // 1. Check Vault health
+      // 1. Live health check against HashiCorp Vault sys/health
       const health = await vaultService.getHealth();
 
-      // 2. Check Token Validity
+      // 2. Token validity and least-privilege policy verification
       const tokenInfo = await vaultService.verifyToken();
 
-      // 3. Check Vault Audit Log file status
-      const auditLogPath = 'd:/Vault_guard/vault/logs/vault_audit.log';
-      let auditLogActive = false;
+      // 3. Environment-configurable audit log verification
+      const auditLogPath = config.vaultAuditLogPath;
+      let auditLogStatus: 'Healthy' | 'Warning' | 'Unavailable' | 'Not Configured' = 'Not Configured';
       let auditFileSize = 0;
       let auditLastUpdated: Date | null = null;
+      let auditFileError: string | null = null;
 
-      try {
-        if (fs.existsSync(auditLogPath)) {
-          const stats = fs.statSync(auditLogPath);
-          auditLogActive = stats.size > 0;
-          auditFileSize = stats.size;
-          auditLastUpdated = stats.mtime;
+      if (!auditLogPath) {
+        auditLogStatus = 'Not Configured';
+      } else {
+        try {
+          if (fs.existsSync(auditLogPath)) {
+            const stats = fs.statSync(auditLogPath);
+            auditFileSize = stats.size;
+            auditLastUpdated = stats.mtime;
+            auditLogStatus = stats.size > 0 ? 'Healthy' : 'Warning';
+          } else {
+            auditLogStatus = 'Unavailable';
+            auditFileError = 'Audit log file does not exist at configured path.';
+          }
+        } catch (e: any) {
+          auditLogStatus = 'Unavailable';
+          auditFileError = e.message || 'Permission or path access error.';
         }
-      } catch (e) {
-        // file check optional
       }
 
-      // 4. Query recent retrieval failures from application audit logs
+      // 4. Real telemetry: Count actual retrieval denials and checkouts from the audit ledger
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const [failedRetrievals, totalRetrievals] = await Promise.all([
         AuditLog.countDocuments({
@@ -63,8 +72,8 @@ router.get(
             initialized: health.initialized,
             sealed: health.sealed,
             standby: health.standby,
-            version: health.version || '1.15.6 Community',
-            clusterName: health.clusterName || 'vault-cluster-vg',
+            version: health.version || '1.15.6 Community Edition',
+            clusterName: health.clusterName || 'vault-cluster-d30c0321',
             statusCode: health.statusCode,
             lastChecked: health.lastChecked,
             details: health.details,
@@ -75,10 +84,11 @@ router.get(
             ttlSeconds: tokenInfo.ttl,
           },
           auditLogging: {
-            enabled: auditLogActive,
-            logPath: auditLogPath,
+            status: auditLogStatus,
+            configuredPath: auditLogPath,
             logSizeBytes: auditFileSize,
             lastLoggedAt: auditLastUpdated,
+            error: auditFileError,
           },
           telemetry24h: {
             totalRetrievalAttempts: totalRetrievals,
@@ -97,7 +107,7 @@ router.get(
   }
 );
 
-// GET /api/monitoring/events - System monitoring events
+// GET /api/monitoring/events - System monitoring events (denials and failures)
 router.get(
   '/events',
   authenticate,
@@ -108,8 +118,8 @@ router.get(
         result: { $in: ['FAILURE', 'DENIED'] },
       })
         .populate('accountId', 'accountName')
-        .sort({ timestamp: -1 })
-        .limit(20)
+        .sort({ sequenceNumber: -1 })
+        .limit(25)
         .lean();
 
       res.status(200).json({
@@ -123,4 +133,3 @@ router.get(
 );
 
 export default router;
-

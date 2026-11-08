@@ -9,6 +9,7 @@ import { Incident } from '../models/Incident';
 import { AuditLog } from '../models/AuditLog';
 import { RotationHistory } from '../models/RotationHistory';
 import { vaultService } from '../services/vault.service';
+import { auditService } from '../services/audit.service';
 
 async function seed() {
   console.log('[Seed] Initializing enterprise database collections and Vault secrets...');
@@ -267,7 +268,18 @@ async function seed() {
       },
     ];
 
-    await AuditLog.insertMany(auditEvents);
+    // Commit initial audit log entries via auditService to establish intact hash chain from Genesis
+    for (const event of auditEvents) {
+      await auditService.log({
+        userId: event.userId,
+        username: event.username,
+        action: event.action,
+        accountId: event.accountId,
+        result: event.result,
+        ipAddress: event.ipAddress,
+        metadata: event.metadata,
+      });
+    }
     console.log('[Seed] Audit ledger and access grants successfully committed.');
   }
 

@@ -134,9 +134,9 @@ npm run dev
 
 ---
 
-## 6. Automated Verification Suite (15 Test Scenarios)
+## 6. Automated Verification Suite (18 Integration Scenarios)
 
-The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 15 scenarios specified in Section 17:
+The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 18 security and governance scenarios:
 
 ```bash
 cd backend
@@ -150,24 +150,27 @@ npm test
 ============================================================
 
 [Database] MongoDB connected successfully to mongodb://127.0.0.1:27017/vaultguard
-[PASS] 1. Successful Login (Admin & Employee)
-[PASS] 2. Invalid Login (Bad Credentials)
-[PASS] 3. Role Authorization (Employee accessing admin-only endpoint)
-[PASS] 4. Account Onboarding (Metadata stored in MongoDB, reference created)
-[PASS] 5. Vault Secret Storage (Actual credential is stored in Vault KV v2)
-[PASS] 6. Unauthorized Credential Retrieval (Employee has no grant -> Denied)
-[PASS] 7. Access Request Submission (Employee requests access with justification)
-[PASS] 8. Access Request Approval & Self-Approval Prevention
-[PASS] 9. Authorized Credential Retrieval (Employee retrieves with active grant)
-[PASS] 10. Access Request Rejection (Admin rejects another request)
-[PASS] 11. Expired Access Denial (Server-side expiry check denies access)
-[PASS] 12. Revoked Access Denial (Admin explicitly revokes grant)
-[PASS] 13. Credential Rotation (Admin initiates rotation, Vault secret updated)
-[PASS] 14. Vault Unavailable (Health check handles failure & fails closed)
-[PASS] 15. Audit Log Generation & Incident Resolution
+[PASS] 1. Successful Login & Cookie-Only JWT Auth (Admin, Employee, Developer)
+[PASS] 2. Invalid Login (Bad Credentials Rejected)
+[PASS] 3. CSRF Protection (State-changing cookie request without X-CSRF-Token blocked)
+[PASS] 4. Role-Based Access Control (Employee accessing admin-only endpoint blocked)
+[PASS] 5. Account Onboarding (Metadata stored in MongoDB, credential in Vault KV v2)
+[PASS] 6. Vault Secret Storage Verification (Credential verified directly in KV v2)
+[PASS] 7. Unauthorized Credential Retrieval (Employee without active grant blocked)
+[PASS] 8. Access Request Submission (Employee submits request with business justification)
+[PASS] 9. Access Request Approval & Self-Approval Prevention
+[PASS] 10. Authorized Credential Retrieval (Employee retrieves with active grant)
+[PASS] 11. Access Request Rejection (Admin rejects request)
+[PASS] 12. Expired Access Denial (Server-side expiry check fails closed)
+[PASS] 13. Revoked Access Denial (Admin explicitly revokes grant)
+[PASS] 14. Credential Rotation (Vault KV v2 secret rotated; Target OS honestly reported)
+[PASS] 15. Tamper-Evident Audit Log Integrity Verification & Tamper Detection
+[PASS] 16. Input Validation (Malformed ObjectIds return 400 Bad Request)
+[PASS] 17. Vault Health Monitoring (Honest reporting on Vault service status)
+[PASS] 18. Audit Log Zero-Password Redaction & Incident Management
 
 ------------------------------------------------------------
-SUMMARY: 15 PASSED, 0 FAILED out of 15 tests.
+SUMMARY: 18 PASSED, 0 FAILED out of 18 tests.
 ------------------------------------------------------------
 ```
 
@@ -262,6 +265,7 @@ SUMMARY: 15 PASSED, 0 FAILED out of 15 tests.
 | `PATCH` | `/api/incidents/:id` | ADMIN | Appends notes and updates incident severity |
 | `PATCH` | `/api/incidents/:id/resolve` | ADMIN | Resolves security incident with remediation notes |
 | `GET` | `/api/audit` | ADMIN | Filtered audit query |
+| `GET` | `/api/audit/verify` | ADMIN | Cryptographic SHA-256 hash chain integrity verification |
 | `GET` | `/api/audit/export` | ADMIN | Exports audit ledger to CSV format |
 | `GET` | `/api/dashboard/summary` | Authenticated | Computes high-level PAM KPIs from live database |
 | `GET` | `/api/dashboard/recent-activity` | Authenticated | Fetches recent audit events and open incidents |

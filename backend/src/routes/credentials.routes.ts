@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import mongoose from 'mongoose';
 import { authenticate, AuthenticatedRequest } from '../middlewares/auth';
 import { credentialRetrievalLimiter } from '../middlewares/rateLimiter';
 import { PrivilegedAccount } from '../models/PrivilegedAccount';
@@ -18,6 +19,12 @@ router.post(
     const user = req.user!;
     const accountId = req.params.id;
 
+    // Validate account ID format
+    if (typeof accountId !== 'string' || !mongoose.Types.ObjectId.isValid(accountId)) {
+      res.status(400).json({ success: false, message: 'Invalid privileged account ID format' });
+      return;
+    }
+
     try {
       const account = await PrivilegedAccount.findById(accountId);
       if (!account) {
@@ -27,9 +34,9 @@ router.post(
 
       let grantExpiryDate: Date | null = null;
 
-      // Access Control Verification
+      // Access Control Verification: Strict enforcement on backend
       if (user.role !== 'ADMIN') {
-        // Find most recent grant for this user and account
+        // Find most recent grant specifically for this authenticated user and account
         const grant = await AccessGrant.findOne({
           userId: user._id,
           accountId: account._id,
@@ -92,7 +99,6 @@ router.post(
 
         // Check if grant has expired (server-side check)
         if (grant.expiresAt <= now || grant.status === 'Expired') {
-          // Mark grant as expired
           grant.status = 'Expired';
           await grant.save();
 
@@ -128,7 +134,7 @@ router.post(
         grantExpiryDate = grant.expiresAt;
       }
 
-      // Check Vault health before retrieval
+      // Check Vault health before retrieval (fail-closed architecture)
       const vaultHealth = await vaultService.getHealth();
       if (vaultHealth.statusText === 'Unavailable' || vaultHealth.sealed) {
         await incidentService.triggerRuleBasedDetection({
@@ -137,7 +143,7 @@ router.post(
           username: user.name,
           accountId: account._id,
           accountName: account.accountName,
-          details: 'Vault unavailable during credential retrieval attempt',
+          details: 'Vault unavailable or sealed during credential retrieval attempt',
         });
 
         res.status(503).json({
@@ -150,7 +156,7 @@ router.post(
       // Retrieve secret from HashiCorp Vault KV v2
       const secretData = await vaultService.getSecret(account.vaultSecretPath);
 
-      // Log successful retrieval
+      // Log successful checkout (never log secret password!)
       await auditService.log({
         userId: user._id,
         username: user.name,
@@ -162,7 +168,7 @@ router.post(
           accountName: account.accountName,
           accountType: account.accountType,
           role: user.role,
-          expiresAt: grantExpiryDate ? grantExpiryDate.toISOString() : 'Admin Emergency Access',
+          expiresAt: grantExpiryDate ? grantExpiryDate.toISOString() : 'Admin Direct Checkout',
         },
       });
 

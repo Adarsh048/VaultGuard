@@ -1,28 +1,29 @@
 # VaultGuard Least-Privilege Application Policy
-# Grants access only to the accounts path in the KV v2 secrets engine
+# Restricts backend access strictly to the accounts data namespace within the KV v2 engine
 
 # KV v2 data path for privileged accounts
+# Allows creating, reading, updating (new version), and deleting secret versions
 path "secret/data/accounts/*" {
   capabilities = ["create", "read", "update", "delete"]
 }
 
 # KV v2 metadata path for privileged accounts
+# Allows reading version metadata, listing keys, and purging deleted versions
 path "secret/metadata/accounts/*" {
-  capabilities = ["list", "read", "delete"]
+  capabilities = ["read", "list", "delete"]
 }
 
-# Health monitoring endpoints
+# System health monitoring (non-sensitive status code and seal state)
 path "sys/health" {
   capabilities = ["read"]
 }
 
-# Allow token self-lookup to verify active session
+# Active token self-verification (used for telemetry and startup verification)
 path "auth/token/lookup-self" {
   capabilities = ["read"]
 }
 
-# Allow token renewal if token is periodic or renewable
+# Active token renewal
 path "auth/token/renew-self" {
   capabilities = ["update"]
 }
-

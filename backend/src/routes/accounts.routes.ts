@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { Types } from 'mongoose';
+import mongoose, { Types } from 'mongoose';
 import { authenticate, AuthenticatedRequest } from '../middlewares/auth';
 import { requireRole } from '../middlewares/rbac';
 import { PrivilegedAccount } from '../models/PrivilegedAccount';
@@ -32,18 +32,18 @@ router.post(
       const { accountName, username, accountType, hostname, description, password } =
         parseResult.data;
 
-      // Check if Vault is available before creating DB record (fail closed principle)
+      // Fail-closed check: ensure Vault is healthy and unsealed before proceeding
       const vaultHealth = await vaultService.getHealth();
       if (vaultHealth.statusText === 'Unavailable' || vaultHealth.sealed) {
         await incidentService.triggerRuleBasedDetection({
           type: 'VAULT_FAILURE',
           userId: req.user?._id,
           username: req.user?.name,
-          details: 'Vault unavailable during privileged account onboarding',
+          details: 'Vault unavailable or sealed during privileged account onboarding',
         });
         res.status(503).json({
           success: false,
-          message: 'HashiCorp Vault is currently sealed or unavailable. Operation aborted to protect credentials.',
+          message: 'HashiCorp Vault is currently sealed or unreachable. Operation aborted to protect credentials.',
         });
         return;
       }
@@ -62,7 +62,7 @@ router.post(
         createdAt: new Date().toISOString(),
       });
 
-      // 2. Store non-sensitive metadata only in MongoDB
+      // 2. Store non-sensitive metadata only in MongoDB (NO PASSWORDS IN DB)
       const newAccount = await PrivilegedAccount.create({
         _id: accountId,
         accountName,
@@ -94,7 +94,7 @@ router.post(
 
       res.status(201).json({
         success: true,
-        message: 'Privileged account onboarded and credentials stored securely in Vault',
+        message: 'Privileged account onboarded and credentials secured in Vault',
         account: newAccount,
       });
     } catch (error: any) {
@@ -107,21 +107,16 @@ router.post(
   }
 );
 
-// GET /api/accounts - List privileged accounts
+// GET /api/accounts - List privileged accounts (metadata only, no passwords)
 router.get(
   '/',
   authenticate,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const isAdmin = req.user?.role === 'ADMIN';
-
-      // Both Admins and Employees can view account metadata.
-      // MongoDB does NOT contain passwords anyway!
-      const query = PrivilegedAccount.find()
+      const accounts = await PrivilegedAccount.find()
         .populate('ownerId', 'name email')
-        .sort({ createdAt: -1 });
-
-      const accounts = await query.lean();
+        .sort({ createdAt: -1 })
+        .lean();
 
       res.status(200).json({
         success: true,
@@ -134,12 +129,17 @@ router.get(
   }
 );
 
-// GET /api/accounts/:id - Get account details
+// GET /api/accounts/:id - Get account metadata
 router.get(
   '/:id',
   authenticate,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      if (typeof req.params.id !== 'string' || !mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ success: false, message: 'Invalid account ID format' });
+        return;
+      }
+
       const account = await PrivilegedAccount.findById(req.params.id)
         .populate('ownerId', 'name email')
         .lean();
@@ -166,6 +166,11 @@ router.put(
   requireRole('ADMIN'),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      if (typeof req.params.id !== 'string' || !mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ success: false, message: 'Invalid account ID format' });
+        return;
+      }
+
       const parseResult = updateAccountSchema.safeParse(req.body);
       if (!parseResult.success) {
         res.status(400).json({
@@ -190,7 +195,7 @@ router.put(
       if (hostname) account.hostname = hostname;
       if (description !== undefined) account.description = description;
 
-      // If new password provided, update HashiCorp Vault
+      // If new password provided, update HashiCorp Vault KV v2
       if (newPassword) {
         await vaultService.storeSecret(account.vaultSecretPath, {
           accountName: account.accountName,
@@ -237,6 +242,11 @@ router.delete(
   requireRole('ADMIN'),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      if (typeof req.params.id !== 'string' || !mongoose.Types.ObjectId.isValid(req.params.id)) {
+        res.status(400).json({ success: false, message: 'Invalid account ID format' });
+        return;
+      }
+
       const account = await PrivilegedAccount.findById(req.params.id);
       if (!account) {
         res.status(404).json({ success: false, message: 'Privileged account not found' });
@@ -278,4 +288,3 @@ router.delete(
 );
 
 export default router;
-
