@@ -111,63 +111,126 @@ flowchart TD
 
 ---
 
-## 5. Deployment & Execution Instructions
+## 5. Local Deployment & Execution Instructions
 
-### Option A: Using Docker Compose (Staged Startup Process)
-
-Docker services bind strictly to `127.0.0.1` on the host. Vault dev mode and unauthenticated MongoDB are scoped for isolated local development only.
-
-```bash
-# 1. Copy the root environment template
-cp .env.example .env
-
-# 2. Stage 1: Start MongoDB and HashiCorp Vault
-docker compose up -d mongodb vault
-
-# 3. Stage 2: Initialize Vault policy, file audit device, and mint application token
-./vault/scripts/init-vault.sh "<VAULT_DEV_ROOT_TOKEN_ID_FROM_ENV>"
-# (On Windows PowerShell: .\vault\scripts\init-vault.ps1 -VaultRootToken "<VAULT_DEV_ROOT_TOKEN_ID_FROM_ENV>")
-
-# 4. Stage 3: Set the minted token in .env as VAULT_APP_TOKEN=<token>
-
-# 5. Stage 4: Start Backend and Frontend
-docker compose up -d backend frontend
-```
-cd backend
-npm install
-npm run seed
-npm run dev
-
-# In a separate terminal, install & start Frontend
-cd ../frontend
-npm install
-npm run dev
-```
-
-### Option B: Native Services (Currently Running on this Host)
-- **MongoDB**: Running on `mongodb://127.0.0.1:27017/vaultguard`
-- **HashiCorp Vault**: Running on `http://127.0.0.1:8200`
-- **Backend API**: Running on `http://localhost:5000`
-- **Frontend Portal**: Running on `http://localhost:5173`
+VaultGuard is built for **isolated, local-only execution on a Windows PC** using persistent storage for both MongoDB and HashiCorp Vault. Development mode (`-dev`) is retired in favor of **persistent integrated Raft storage** (`storage "raft"`) with cryptographic Shamir unsealing.
 
 ---
 
-## 6. Automated Verification Suite (28 Integration Scenarios)
+### Option A: Native Windows PowerShell Workflow (Recommended for Local PC)
 
-The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 28 security, governance, concurrency, and validation scenarios:
+This workflow runs HashiCorp Vault Community Edition (v1.15.6) natively via `bin\vault.exe` using `vault/config/vault-local.hcl` with persistent Raft storage in `vault/data/`. All services bind strictly to `127.0.0.1`.
+
+#### Step 1: Start Persistent Vault Server
+In an elevated or standard Windows PowerShell terminal:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\start-vault-persistent.ps1
+```
+*Vault launches in background with integrated Raft storage listening on `http://127.0.0.1:8200`.*
+
+#### Step 2: Cryptographic Shamir Initialization (One-Time Setup)
+Initialize the Vault security barrier with Shamir secret sharing (5 keys, threshold 3):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\init-vault-persistent.ps1
+```
+- Safely generates 5 unseal key shares and 1 root operator token.
+- Automatically saves operator credentials to `vault/unseal-keys.json` (protected by `.gitignore`).
+- Includes safety check: blocks re-initialization if Vault is already initialized.
+
+#### Step 3: Unseal the Vault Server
+Apply 3 of the 5 Shamir keys to unseal the storage barrier:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\unseal-vault.ps1
+```
+- Automatically uses keys from `vault/unseal-keys.json` or prompts interactively.
+- Vault transitions from `Sealed: true` to `Active: true`.
+
+#### Step 4: Provision Least-Privilege AppRole & KV v2 Engine
+Configure VaultGuard policies, secrets engine, and AppRole credentials:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\configure-vaultguard-approle.ps1
+```
+- Enables KV v2 secrets engine at `secret/`.
+- Registers least-privilege application policy `vaultguard-app` (`vault/policies/vaultguard-app-policy.hcl`).
+- Enables HashiCorp Vault file audit logging to `vault/logs/vault_audit.log`.
+- Configures AppRole `vaultguard-role` with 1-hour auto-renewing tokens.
+- Generates `VAULT_ROLE_ID`, `VAULT_SECRET_ID`, and backup `VAULT_APP_TOKEN`.
+- Automatically stages credentials into `backend/.env` without console credential leakage.
+
+#### Step 5: Verify Persistent Raft Storage Across Server Restarts
+Run the automated persistence verification test:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\verify-persistence.ps1
+```
+*Stores a test secret in KV v2, shuts down Vault, restarts the server, confirms Vault restarts SEALED with data intact, unseals with 3 keys, verifies the secret matches, and cleans up.*
+
+#### Step 6: Start Application Backend and Frontend
+In separate PowerShell terminals:
+```powershell
+# Terminal 1: Backend API (Port 5000)
+cd backend
+npm install
+npm run seed     # Seeds synthetic demo accounts & users
+npm run dev
+
+# Terminal 2: Frontend Portal (Port 5173)
+cd frontend
+npm install
+npm run dev
+```
+
+#### Stopping Vault Server
+To gracefully stop all running local Vault processes:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\stop-vault-persistent.ps1
+```
+
+---
+
+### Option B: Docker Compose Workflow (Persistent Raft Volume)
+
+If Docker Desktop is installed, start containerized persistent Vault and MongoDB:
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Start persistent MongoDB and Vault containers
+docker compose up -d mongodb vault
+
+# 3. Initialize Vault inside the container (if uninitialized)
+docker compose exec vault vault operator init -key-shares=5 -key-threshold=3
+
+# 4. Unseal Vault using 3 of the unseal keys
+docker compose exec vault vault operator unseal <KEY_1>
+docker compose exec vault vault operator unseal <KEY_2>
+docker compose exec vault vault operator unseal <KEY_3>
+
+# 5. Configure AppRole using root token
+.\vault\scripts\configure-vaultguard-approle.ps1 -VaultRootToken "<ROOT_TOKEN>"
+
+# 6. Start Application services
+docker compose up -d backend frontend
+```
+
+---
+
+## 6. Automated Verification Suite (36 Integration Scenarios)
+
+The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 36 security, governance, concurrency, and validation scenarios:
 
 ```bash
 cd backend
 npm test
 ```
 
-### Verified Test Results:
+### Verified Test Results (36 Passed, 0 Failed):
 ```text
 ============================================================
    VAULTGUARD PAM SYSTEM - AUTOMATED INTEGRATION TESTS      
 ============================================================
 
-[Database] MongoDB connected successfully to mongodb://127.0.0.1:27017/vaultguard
+[Database] Connecting to MongoDB (mongodb://127.0.0.1:27017/vaultguard)...
+[Database] MongoDB connection established successfully
 [PASS] 1. Successful Login & Cookie-Only JWT Auth (Admin, Employee, Developer)
 [PASS] 2. Invalid Login (Bad Credentials Rejected)
 [PASS] 3. CSRF Protection (State-changing cookie request without X-CSRF-Token blocked)
@@ -196,9 +259,17 @@ npm test
 [PASS] 26. Audit Failure During Approval Triggers Compensation Rollback
 [PASS] 27. Rollback Failure Triggers Critical Security Incident & Fails Closed
 [PASS] 28. Orphan Grant Rejection (Credential checkout denied if request is not Approved)
+[PASS] 29. Production Health Checks (Liveness vs Dependency Readiness)
+[PASS] 30. Vault AppRole Authentication & Token Renewal Engine
+[PASS] 31. Vault AppRole Token Expiry & Failure Handling
+[PASS] 32. Vercel Serverless Function Handler Compatibility (All HTTP Methods & Proxy Features)
+[PASS] 33. Authenticated Session Refresh (/api/auth/refresh) & Logout Flow
+[PASS] 34. Comprehensive Vercel Serverless Routing Matrix (All Key Endpoints Verified)
+[PASS] 35. AppRole Expired SecretID Failure Handling & Zero-Credential Leakage
+[PASS] 36. Database Dependency Readiness Failure Handling (503 on DB Outage)
 
 ------------------------------------------------------------
-SUMMARY: 28 PASSED, 0 FAILED out of 28 tests.
+SUMMARY: 36 PASSED, 0 FAILED out of 36 tests.
 ------------------------------------------------------------
 ```
 
@@ -578,3 +649,97 @@ VaultGuard separates process liveness from external dependency readiness:
 | **Health Checks (Live vs Ready)** | Verified (200 on healthy; 503 on database or Vault outage) | Ready for external uptime monitoring |
 | **Database Connection Caching** | Verified (`global.mongooseCache` prevents connection storms) | Requires MongoDB Atlas SRV URI |
 | **Live Vercel Deployment** | Pending user deployment initiation | Step-by-step instructions provided |
+
+---
+
+## 11. 3-Minute Technical Interview Demonstration Guide
+
+This structured demonstration playbook is engineered specifically for technical interviews, security architecture reviews, and hiring manager presentations. It highlights enterprise Privileged Access Management (PAM) concepts, secrets lifecycle management, defensive error handling, and cryptographic auditing in **exactly 3 minutes**.
+
+### 11.1 Pre-Interview Setup Checklist
+Before starting the call or screen share, ensure all local services are active:
+```powershell
+# 1. Verify Vault is unsealed and active
+powershell -ExecutionPolicy Bypass -File .\vault\scripts\unseal-vault.ps1
+
+# 2. Verify MongoDB is running locally
+mongosh --eval "db.adminCommand('ping')"
+
+# 3. Ensure Backend (port 5000) and Frontend (port 5173) are running
+# Navigate to http://localhost:5173 in browser
+```
+
+---
+
+### 11.2 Demonstration Script & Timing Breakdown
+
+#### ⏱️ Part 1: Architecture & Secrets Isolation (0:00 – 0:45)
+1. **Show the Login Screen & Architecture (`http://localhost:5173`)**:
+   - Log in as **Alexander Vance** (`admin@vaultguard.local` / `AdminPassword!2026`).
+   - *Talking Point*: *"VaultGuard is a PAM architecture modeled after enterprise solutions like CyberArk. It strictly isolates privileged credentials from application metadata."*
+2. **Demonstrate Zero Cleartext Passwords in MongoDB**:
+   - Click **Credential Vault**. Point out the registered infrastructure assets (`PROD-DC01-AD`, `K8S-MASTER-CORE01`, etc.).
+   - *Talking Point*: *"MongoDB strictly stores resource metadata and a Vault reference path (`secret/data/accounts/acc_*`). The database never sees or stores plaintext passwords."*
+3. **Highlight HashiCorp Vault Persistent Raft Storage**:
+   - *Talking Point*: *"Under the hood, we are running HashiCorp Vault Community Edition with integrated Raft storage and Shamir secret sharing (3-of-5 threshold). The backend accesses Vault using a least-privilege AppRole with short-lived auto-renewing tokens."*
+
+#### ⏱️ Part 2: Just-In-Time (JIT) Dual-Custody Governance (0:45 – 1:45)
+1. **Switch to Requester (Sarah Jenkins)**:
+   - In an incognito window or separate browser tab, log in as `employee@vaultguard.local` (`EmployeePassword!2026`).
+   - Navigate to **Credential Vault**. Attempt to retrieve `PROD-DC01-AD`.
+   - Point out that credential access is blocked without an active grant.
+2. **Submit Just-In-Time (JIT) Access Request**:
+   - Click **Request Access** on `K8S-MASTER-CORE01`.
+   - Enter business justification: *"Emergency CVE mitigation on cluster master"* and select duration: **60 minutes**. Submit.
+3. **Enforce Dual-Custody Approval (Admin Screen)**:
+   - Switch back to Admin window -> **Access Requests**.
+   - Point out: *"Administrators cannot self-approve their own requests (dual-custody enforcement)."*
+   - Review Sarah's request, approve it with a review comment.
+4. **Authorized Credential Checkout**:
+   - Switch back to Sarah's window. The status immediately updates to **Active Grant**.
+   - Click **Check Out Credential**.
+   - Point out the **in-memory retrieval modal**:
+     - Credential decrypted on-demand from Vault KV v2.
+     - 60-second auto-clearing memory timer.
+     - Clipboard copy with auto-clear.
+
+#### ⏱️ Part 3: Cryptographic Rotation & Incident Detection (1:45 – 2:30)
+1. **Execute Vault KV v2 Secret Rotation**:
+   - In Admin window, navigate to **Credential Rotation**.
+   - Select `PROD-DC01-AD` and click **Execute Rotation**.
+   - Point out: The backend generates a 32-character high-entropy cryptographic password, writes a new version directly to Vault KV v2, verifies the write, and updates rotation history.
+   - Point out the honest target status: Target host OS agent is reported as simulated (see Disclosure 3).
+2. **Incident Management & Forensics**:
+   - Navigate to **Incidents**.
+   - Show how anomalous behavior (repeated denied checkouts or rotation anomalies) automatically triggers rule-based security incidents.
+   - Open an incident, append forensic investigation notes, and resolve it.
+
+#### ⏱️ Part 4: Tamper-Evident SHA-256 Audit Ledger & Live Telemetry (2:30 – 3:00)
+1. **Verify Audit Hash Chain Integrity**:
+   - Navigate to **Audit Logs**.
+   - Point out the complete, zero-redacted operational audit trail.
+   - Click **Verify Hash Chain Integrity**. The system walks the entire SHA-256 ledger from Genesis (`0000...0000`) and reports `INTEGRITY_VERIFIED: All records cryptographically intact`.
+2. **Inspect Live Vault Telemetry**:
+   - Navigate to **Monitoring**.
+   - Point out live Vault telemetry: Shamir seal status (`Sealed: false`), AppRole token lease, storage engine (`raft`), physical audit device status, and fail-closed readiness checks.
+   - *Closing Statement*: *"VaultGuard demonstrates that enterprise PAM security principles—least-privilege access, zero cleartext secret storage, dual-custody governance, and cryptographic auditing—can be practically implemented with modern full-stack technologies."*
+
+---
+
+### 11.3 Mandatory Technical Disclosures (Proactive Interview Transparency)
+
+To maintain absolute professional integrity during technical interviews and architecture evaluations, proactively disclose the following architectural boundaries:
+
+1. **Local-Only Demonstration Environment**:
+   - VaultGuard is currently running in a local environment on this Windows PC (native MongoDB on port 27017, persistent HashiCorp Vault on port 8200, Node.js on port 5000, and React on port 5173). It does not require or depend on external cloud hosting for evaluation.
+2. **Synthetic Demonstration Data**:
+   - All user identities (Alexander Vance, Sarah Jenkins, David Kim), hostnames (`PROD-DC01-AD`), IP addresses (`10.0.10.x`), and credentials are **synthetic fixtures** seeded for local portfolio demonstration only. No production or real infrastructure is targeted.
+3. **Target Host OS Credential Rotation Scope**:
+   - The application fully implements and cryptographically verifies HashiCorp Vault KV v2 secret rotation and versioning.
+   - However, VaultGuard does **not** deploy native host agents or execute remote RPC/WMI/SSH commands to manipulate passwords on physical target Windows Domain Controllers or Linux instances. The API and UI explicitly report `targetStatus: 'NOT_IMPLEMENTED'` and `targetPasswordChanged: false`.
+4. **Audit Hash Chain Scope & Boundaries**:
+   - The SHA-256 hash chaining mechanism provides application-level tamper evidence within the database ledger. Any retroactive record modification, reordering, or individual deletion breaks the chain and is detected by `GET /api/audit/verify`.
+   - It is not an immutable distributed blockchain or WORM optical storage; an attacker with full root database access who rewrites the entire chain from Genesis could forge it without external cryptographic time-stamping. HashiCorp Vault's independent HMAC file audit device (`vault_audit.log`) serves as the secondary operational record.
+5. **AppRole SecretID Lifecycle & Rotation**:
+   - In production environments, AppRole SecretIDs carry a 30-day (`720h`) time-to-live. VaultGuard provides zero-downtime rotation scripts (`rotate-secret-id.ps1` / `.sh`) allowing operators to mint a new SecretID and update environment variables before the old SecretID expires.
+

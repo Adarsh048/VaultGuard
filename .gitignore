@@ -27,6 +27,12 @@ bin/
 vault/logs/*
 !vault/logs/.gitkeep
 
+# Vault Local Persistent Storage & Backups
+vault/data/
+vault/backup/
+vault/unseal-keys.json
+vault/operator-keys.json
+
 # IDE & OS files
 .vscode/
 .idea/

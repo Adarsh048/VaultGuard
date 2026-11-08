@@ -31,9 +31,8 @@ services:
     ports:
       - "127.0.0.1:8200:8200"
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:?VAULT_DEV_ROOT_TOKEN_ID must be configured explicitly in .env}
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
       VAULT_ADDR: "http://127.0.0.1:8200"
+      VAULT_API_ADDR: "http://127.0.0.1:8200"
     cap_add:
       - IPC_LOCK
     volumes:
@@ -41,8 +40,9 @@ services:
       - ./vault/policies:/vault/policies:ro
       - ./vault/logs:/vault/logs
       - vault_data:/vault/data
-    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    command: ["server", "-config=/vault/config/vault.hcl"]
     healthcheck:
+      # Returns 0 when unsealed and active, ensuring dependent services wait until operator unseals Vault
       test: ["CMD", "vault", "status"]
       interval: 10s
       timeout: 5s
@@ -65,7 +65,9 @@ services:
       MONGO_URI: mongodb://mongodb:27017/vaultguard
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be configured explicitly in .env (minimum 32 characters)}
       VAULT_ADDR: http://vault:8200
-      VAULT_APP_TOKEN: ${VAULT_APP_TOKEN:?VAULT_APP_TOKEN must be configured with a restricted application token}
+      VAULT_ROLE_ID: ${VAULT_ROLE_ID:-}
+      VAULT_SECRET_ID: ${VAULT_SECRET_ID:-}
+      VAULT_APP_TOKEN: ${VAULT_APP_TOKEN:-}
       VAULT_KV_MOUNT: secret
       VAULT_AUDIT_LOG_PATH: /vault/logs/vault_audit.log
       CORS_ORIGIN: http://localhost:5173

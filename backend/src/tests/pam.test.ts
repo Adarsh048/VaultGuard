@@ -1,4 +1,6 @@
 import assert from 'assert';
+import fs from 'fs';
+import path from 'path';
 import axios from 'axios';
 import request from 'supertest';
 import mongoose, { Types } from 'mongoose';
@@ -14,6 +16,20 @@ import { AuditLog } from '../models/AuditLog';
 import { RotationHistory } from '../models/RotationHistory';
 import { vaultService } from '../services/vault.service';
 import { auditService } from '../services/audit.service';
+
+function getVaultAdminToken(): string {
+  if (process.env.VAULT_TOKEN) {
+    return process.env.VAULT_TOKEN;
+  }
+  const keyFilePath = path.resolve(__dirname, '../../../vault/unseal-keys.json');
+  if (fs.existsSync(keyFilePath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(keyFilePath, 'utf8'));
+      if (parsed.root_token) return parsed.root_token;
+    } catch {}
+  }
+  return 'root-master-token-vg2026';
+}
 
 interface UserSession {
   cookieHeader: string;
@@ -868,18 +884,24 @@ async function runTests() {
 
   // TEST 30: Vault AppRole Authentication & Token Renewal Engine
   await testStep('30. Vault AppRole Authentication & Token Renewal Engine', async () => {
-    // Read local AppRole role_id and secret_id from local Vault instance
-    const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
-      headers: { 'X-Vault-Token': 'root-master-token-vg2026' },
-    });
-    const testRoleId = roleIdRes.data.data.role_id;
+    // Read local AppRole role_id and secret_id
+    let testRoleId = config.vaultRoleId;
+    let testSecretId = config.vaultSecretId;
 
-    const secretIdRes = await axios.post(
-      `${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/secret-id`,
-      {},
-      { headers: { 'X-Vault-Token': 'root-master-token-vg2026' } }
-    );
-    const testSecretId = secretIdRes.data.data.secret_id;
+    if (!testRoleId || !testSecretId) {
+      const adminToken = getVaultAdminToken();
+      const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
+        headers: { 'X-Vault-Token': adminToken },
+      });
+      testRoleId = roleIdRes.data.data.role_id;
+
+      const secretIdRes = await axios.post(
+        `${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/secret-id`,
+        {},
+        { headers: { 'X-Vault-Token': adminToken } }
+      );
+      testSecretId = secretIdRes.data.data.secret_id;
+    }
 
     // Temporarily configure config with AppRole credentials
     const originalRoleId = config.vaultRoleId;
@@ -927,17 +949,23 @@ async function runTests() {
 
   // TEST 31: Vault AppRole Token Expiry & Automatic Refresh / Failure Handling
   await testStep('31. Vault AppRole Token Expiry & Failure Handling', async () => {
-    const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
-      headers: { 'X-Vault-Token': 'root-master-token-vg2026' },
-    });
-    const testRoleId = roleIdRes.data.data.role_id;
+    let testRoleId = config.vaultRoleId;
+    let testSecretId = config.vaultSecretId;
 
-    const secretIdRes = await axios.post(
-      `${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/secret-id`,
-      {},
-      { headers: { 'X-Vault-Token': 'root-master-token-vg2026' } }
-    );
-    const testSecretId = secretIdRes.data.data.secret_id;
+    if (!testRoleId || !testSecretId) {
+      const adminToken = getVaultAdminToken();
+      const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
+        headers: { 'X-Vault-Token': adminToken },
+      });
+      testRoleId = roleIdRes.data.data.role_id;
+
+      const secretIdRes = await axios.post(
+        `${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/secret-id`,
+        {},
+        { headers: { 'X-Vault-Token': adminToken } }
+      );
+      testSecretId = secretIdRes.data.data.secret_id;
+    }
 
     const originalRoleId = config.vaultRoleId;
     const originalSecretId = config.vaultSecretId;
@@ -1148,10 +1176,14 @@ async function runTests() {
 
   // TEST 35: AppRole Expired SecretID & Failure Zero-Credential Leakage
   await testStep('35. AppRole Expired SecretID Failure Handling & Zero-Credential Leakage', async () => {
-    const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
-      headers: { 'X-Vault-Token': 'root-master-token-vg2026' },
-    });
-    const testRoleId = roleIdRes.data.data.role_id;
+    let testRoleId = config.vaultRoleId;
+    if (!testRoleId) {
+      const adminToken = getVaultAdminToken();
+      const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
+        headers: { 'X-Vault-Token': adminToken },
+      });
+      testRoleId = roleIdRes.data.data.role_id;
+    }
     const expiredSecretId = '00000000-0000-0000-0000-expired00000';
 
     const originalRoleId = config.vaultRoleId;
