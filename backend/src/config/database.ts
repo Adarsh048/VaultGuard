@@ -1,5 +1,15 @@
 import mongoose from 'mongoose';
+import dns from 'dns';
 import { config } from './env';
+
+// Ensure reliable DNS resolution for mongodb+srv:// SRV records across local OS resolvers
+if (config.mongoUri.startsWith('mongodb+srv://') && process.platform === 'win32') {
+  try {
+    dns.setServers(['8.8.8.8', '1.1.1.1']);
+  } catch {
+    // Preserve default OS DNS resolvers
+  }
+}
 
 interface MongooseCache {
   conn: typeof mongoose | null;
