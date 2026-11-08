@@ -18,9 +18,13 @@ vault status || exit 1
 echo "[Vault Init] Writing least-privilege policy: vaultguard-app..."
 vault policy write vaultguard-app /vault/policies/vaultguard-app-policy.hcl
 
-echo "[Vault Init] Enabling file audit device..."
+echo "[Vault Init] Configuring file audit device..."
 mkdir -p /vault/logs
-vault audit enable file file_path=/vault/logs/vault_audit.log 2>/dev/null || true
+if vault audit list -format=json 2>/dev/null | grep -q '"file/"'; then
+  echo "[Vault Init] Audit device 'file/' is already enabled."
+else
+  vault audit enable file file_path=/vault/logs/vault_audit.log
+fi
 
 echo "[Vault Init] Minting restricted application identity token (policy=vaultguard-app, ttl=720h)..."
 APP_TOKEN=$(vault token create -policy=vaultguard-app -period=720h -field=token)

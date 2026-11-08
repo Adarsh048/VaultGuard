@@ -4,6 +4,7 @@ import { authenticate, AuthenticatedRequest } from '../middlewares/auth';
 import { credentialRetrievalLimiter } from '../middlewares/rateLimiter';
 import { PrivilegedAccount } from '../models/PrivilegedAccount';
 import { AccessGrant } from '../models/AccessGrant';
+import { AccessRequest } from '../models/AccessRequest';
 import { vaultService } from '../services/vault.service';
 import { auditService } from '../services/audit.service';
 import { incidentService } from '../services/incident.service';
@@ -75,8 +76,11 @@ router.post(
           return;
         }
 
-        // Check if grant is revoked
-        if (grant.revokedAt || grant.status === 'Revoked') {
+        // Fetch corresponding request for dual-verification
+        const correspondingRequest = await AccessRequest.findById(grant.requestId);
+
+        // 1. Check if grant or request has been revoked
+        if (grant.revokedAt || grant.status === 'Revoked' || correspondingRequest?.status === 'Revoked') {
           await auditService.log({
             userId: user._id,
             username: user.name,
@@ -93,6 +97,38 @@ router.post(
           res.status(403).json({
             success: false,
             message: 'Access Denied: Your access grant for this privileged account was revoked by an administrator.',
+          });
+          return;
+        }
+
+        // 2. Security check: Dual-verification of AccessGrant and corresponding approved AccessRequest
+        if (!correspondingRequest || correspondingRequest.status !== 'Approved') {
+          await incidentService.triggerRuleBasedDetection({
+            type: 'UNAUTHORIZED_ACCESS',
+            userId: user._id,
+            username: user.name,
+            accountId: account._id,
+            accountName: account.accountName,
+            details: `Orphan or inconsistent grant detected: Grant ${grant._id} references request ${grant.requestId} with status '${correspondingRequest?.status || 'NOT_FOUND'}'.`,
+          });
+
+          await auditService.log({
+            userId: user._id,
+            username: user.name,
+            action: 'CREDENTIAL_RETRIEVAL_DENIED',
+            accountId: account._id,
+            result: 'DENIED',
+            ipAddress: req.ip || '127.0.0.1',
+            metadata: {
+              reason: 'Orphan or invalid grant: Corresponding request is not in Approved state',
+              grantId: grant._id,
+              requestStatus: correspondingRequest?.status || 'NOT_FOUND',
+            },
+          });
+
+          res.status(403).json({
+            success: false,
+            message: 'Access Denied: Associated access request is not approved or is in an inconsistent state.',
           });
           return;
         }

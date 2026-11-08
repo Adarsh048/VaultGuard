@@ -72,15 +72,17 @@ flowchart TD
 
 1. **Zero Cleartext Secret Persistence in MongoDB**:
    - The application database (`MongoDB`) strictly stores account metadata, ownership, target hostnames, and the Vault reference path (`accounts/acc_<id>`).
-   - Plaintext passwords and Vault root tokens are **never** stored in MongoDB or exposed in API responses.
+   - Plaintext passwords and Vault root tokens are **never** stored in MongoDB. Credentials (target username and decrypted password) are returned **strictly through the authorized, time-bounded credential checkout endpoint** (`POST /api/accounts/:id/retrieve`) upon verification of an active grant and approved access request. General account list, metadata, audit, and user profile endpoints never expose credentials.
 2. **Fail-Closed Architecture**:
    - If HashiCorp Vault is unreachable, sealed, or reports degraded status, credential retrievals and account onboards **immediately fail closed** (returning HTTP 503). Under no circumstances are fallback plaintext stores used.
 3. **Dual-Custody & Self-Approval Prevention**:
    - Administrators cannot approve their own privileged access requests. Approvals require an independent administrator review.
 4. **Server-Enforced Access Grants**:
    - Temporary access grants expire automatically on the backend server. Even if a client bypasses UI timers, the server enforces strict timestamp and revocation checks before contacting Vault.
-5. **Tamper-Evident SHA-256 Hash Chaining**:
-   - Application audit logs are cryptographically linked in a sequential SHA-256 hash chain from Genesis (`0000...0000`). Modifying or deleting any historical log breaks verification.
+5. **Tamper-Evident SHA-256 Hash Chaining (Scope & Boundaries)**:
+   - Application audit logs are cryptographically linked in a sequential SHA-256 hash chain from Genesis (`0000...0000`).
+   - The mechanism is **tamper-evident** (not immutable or tamper-proof): any retroactive modification, reordering, or individual deletion breaks chain verification and is flagged by `GET /api/audit/verify`.
+   - Complete chain rewriting or tail truncation cannot be detected without external cryptographic anchoring (e.g., public timestamping, external blockchain, or remote witness services).
    - Separate Vault Audit Device: HashiCorp Vault independently logs its own API interactions via a file audit device using internal HMAC hashing.
 6. **Credential Redaction**:
    - The audit service automatically scrubs and redacts fields containing `password`, `token`, `secret`, `credential`, `hash`, `cookie`, `auth`, or `private` before recording events.
@@ -91,15 +93,17 @@ flowchart TD
 
 - **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, Lucide React, Axios, React Router v7.
 - **Backend**: Node.js v24, Express 4, TypeScript, JWT (HTTP-Only Secure Cookies), bcrypt (10 rounds), Zod validation, Helmet, Express Rate Limit.
-- **Database**: MongoDB 8.x with Mongoose ODM (strictly object references and schemas).
-- **Secrets Engine**: HashiCorp Vault Community Edition (v1.15.6), KV Secrets Engine Version 2, custom ACL policy (`vaultguard-app`), file audit device.
-- **Local Development**: Docker Compose & native Windows services.
+- **Database**: MongoDB 8.x with Mongoose ODM (strictly object references and schemas, bound to 127.0.0.1).
+- **Secrets Engine**: HashiCorp Vault Community Edition (v1.15.6), KV Secrets Engine Version 2, custom ACL policy (`vaultguard-app`), file audit device (bound to 127.0.0.1).
+- **Local Development**: Docker Compose & native services.
 
 ---
 
-## 4. Production Identity & Roles
+## 4. Synthetic Demonstration Identity & Roles
 
-| Role | Name | Email | Corporate Responsibility |
+> **NOTE:** All users, hostnames, IP addresses (`10.0.x.x`), and credentials listed below are **synthetic demonstration data** for isolated local portfolio evaluation only.
+
+| Role | Name | Email | Synthetic Demonstration Responsibility |
 | :--- | :--- | :--- | :--- |
 | **ADMIN** | Alexander Vance | `admin@vaultguard.local` | Principal Security Administrator: PAM governance, HashiCorp Vault management, approvals, credential rotation, forensic investigation |
 | **EMPLOYEE** | Sarah Jenkins | `employee@vaultguard.local` | Senior Systems Engineer: Infrastructure operations, JIT access requests, authorized credential checkout |
@@ -109,15 +113,26 @@ flowchart TD
 
 ## 5. Deployment & Execution Instructions
 
-### Option A: Using Docker Compose
+### Option A: Using Docker Compose (Staged Startup Process)
+
+Docker services bind strictly to `127.0.0.1` on the host. Vault dev mode and unauthenticated MongoDB are scoped for isolated local development only.
+
 ```bash
-# Start MongoDB and HashiCorp Vault
-docker compose up -d
+# 1. Copy the root environment template
+cp .env.example .env
 
-# Initialize Vault policy and audit device
-./vault/scripts/init-vault.sh
+# 2. Stage 1: Start MongoDB and HashiCorp Vault
+docker compose up -d mongodb vault
 
-# Install & start Backend
+# 3. Stage 2: Initialize Vault policy, file audit device, and mint application token
+./vault/scripts/init-vault.sh "<VAULT_DEV_ROOT_TOKEN_ID_FROM_ENV>"
+# (On Windows PowerShell: .\vault\scripts\init-vault.ps1 -VaultRootToken "<VAULT_DEV_ROOT_TOKEN_ID_FROM_ENV>")
+
+# 4. Stage 3: Set the minted token in .env as VAULT_APP_TOKEN=<token>
+
+# 5. Stage 4: Start Backend and Frontend
+docker compose up -d backend frontend
+```
 cd backend
 npm install
 npm run seed
@@ -137,9 +152,9 @@ npm run dev
 
 ---
 
-## 6. Automated Verification Suite (25 Integration Scenarios)
+## 6. Automated Verification Suite (28 Integration Scenarios)
 
-The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 25 security, governance, concurrency, and validation scenarios:
+The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 28 security, governance, concurrency, and validation scenarios:
 
 ```bash
 cd backend
@@ -172,15 +187,18 @@ npm test
 [PASS] 17. Vault Health Monitoring (Honest reporting on Vault service status)
 [PASS] 18. Audit Log Zero-Password Redaction & Incident Management
 [PASS] 19. Independent Audit Field Tampering Detection (userId & ipAddress)
-[PASS] 20. Concurrency in Audit Logging (Parallel writes preserve sequence & chain)
+[PASS] 20. Intra-Process Concurrency in Audit Logging (Parallel writes in single Node process preserve chain)
 [PASS] 21. Audit Persistence Failure & Observable Error Propagation
 [PASS] 22. Access Request Review Input Validation (Invalid body rejected with 400)
 [PASS] 23. Concurrent Approval Conflict Handling (Atomic state transition)
 [PASS] 24. Approval State-Transition Compensation Rollback on Grant Failure
 [PASS] 25. Real Monitoring Metadata (Actual Vault telemetry returned)
+[PASS] 26. Audit Failure During Approval Triggers Compensation Rollback
+[PASS] 27. Rollback Failure Triggers Critical Security Incident & Fails Closed
+[PASS] 28. Orphan Grant Rejection (Credential checkout denied if request is not Approved)
 
 ------------------------------------------------------------
-SUMMARY: 25 PASSED, 0 FAILED out of 25 tests.
+SUMMARY: 28 PASSED, 0 FAILED out of 28 tests.
 ------------------------------------------------------------
 ```
 

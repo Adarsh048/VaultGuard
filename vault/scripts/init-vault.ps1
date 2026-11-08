@@ -24,10 +24,15 @@ if (!(Test-Path $auditLogDir)) {
     New-Item -ItemType Directory -Path $auditLogDir -Force | Out-Null
 }
 $auditLogPath = "d:/Vault_guard/vault/logs/vault_audit.log"
-try {
+
+$auditListJson = & $vaultExe audit list -format=json 2>$null
+if ($auditListJson -and ($auditListJson | ConvertFrom-Json).PSObject.Properties['file/']) {
+    Write-Host "[Vault Init] Audit device 'file/' is already enabled."
+} else {
     & $vaultExe audit enable file file_path=$auditLogPath
-} catch {
-    Write-Host "[Vault Init] Audit device already enabled or configured."
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to enable Vault audit device at path $auditLogPath"
+    }
 }
 
 Write-Host "[Vault Init] Minting restricted application identity token (policy=vaultguard-app)..."

@@ -5,6 +5,7 @@ import { requireRole } from '../middlewares/rbac';
 import { AccessRequest } from '../models/AccessRequest';
 import { AccessGrant } from '../models/AccessGrant';
 import { PrivilegedAccount } from '../models/PrivilegedAccount';
+import { Incident } from '../models/Incident';
 import { auditService } from '../services/audit.service';
 import {
   createAccessRequestSchema,
@@ -220,16 +221,46 @@ router.patch(
         });
       } catch (grantErr: any) {
         // Rollback request state to Pending so it is not left Approved without an active grant
-        await AccessRequest.updateOne(
-          { _id: updatedRequest._id },
-          {
-            $set: {
-              status: 'Pending',
-              reviewedBy: null,
-              approvalComment: '',
-            },
+        try {
+          await AccessRequest.updateOne(
+            { _id: updatedRequest._id },
+            {
+              $set: {
+                status: 'Pending',
+                reviewedBy: null,
+                approvalComment: '',
+              },
+            }
+          );
+        } catch (rollbackErr: any) {
+          // If rollback fails, create a high-severity incident and fail closed
+          try {
+            const year = new Date().getFullYear();
+            await Incident.create({
+              incidentId: `INC-${year}-${Date.now().toString().slice(-4)}`,
+              title: 'Compensation Rollback Failure: Inconsistent Access Request State',
+              description: `Critical: Failed to rollback AccessRequest ${updatedRequest._id} to Pending after grant creation error. System state is inconsistent.`,
+              severity: 'Critical',
+              status: 'Open',
+              investigationNotes: [
+                {
+                  text: `Grant error: ${grantErr.message} | Rollback error: ${rollbackErr.message}`,
+                  author: 'System',
+                  timestamp: new Date(),
+                },
+              ],
+            });
+          } catch (incErr) {
+            console.error('[Requests] Failed to record rollback incident:', incErr);
           }
-        );
+
+          res.status(500).json({
+            success: false,
+            message: 'Critical error: Grant activation and compensation rollback failed. Security incident generated (fail-closed).',
+          });
+          return;
+        }
+
         res.status(500).json({
           success: false,
           message: `Failed to issue access grant: ${grantErr.message}. Request reverted to Pending.`,
@@ -255,17 +286,47 @@ router.patch(
           },
         });
       } catch (auditErr: any) {
-        await AccessGrant.deleteOne({ _id: grant._id });
-        await AccessRequest.updateOne(
-          { _id: updatedRequest._id },
-          {
-            $set: {
-              status: 'Pending',
-              reviewedBy: null,
-              approvalComment: '',
-            },
+        try {
+          await AccessGrant.deleteOne({ _id: grant._id });
+          await AccessRequest.updateOne(
+            { _id: updatedRequest._id },
+            {
+              $set: {
+                status: 'Pending',
+                reviewedBy: null,
+                approvalComment: '',
+              },
+            }
+          );
+        } catch (rollbackErr: any) {
+          // If rollback fails, create a high-severity incident and fail closed
+          try {
+            const year = new Date().getFullYear();
+            await Incident.create({
+              incidentId: `INC-${year}-${Date.now().toString().slice(-4)}`,
+              title: 'Compensation Rollback Failure: Orphan Access Grant Detected',
+              description: `Critical: Audit logging failed and compensation rollback failed to remove grant ${grant._id} or revert request ${updatedRequest._id}.`,
+              severity: 'Critical',
+              status: 'Open',
+              investigationNotes: [
+                {
+                  text: `Audit error: ${auditErr.message} | Rollback error: ${rollbackErr.message}`,
+                  author: 'System',
+                  timestamp: new Date(),
+                },
+              ],
+            });
+          } catch (incErr) {
+            console.error('[Requests] Failed to record rollback incident:', incErr);
           }
-        );
+
+          res.status(500).json({
+            success: false,
+            message: 'Critical error: Audit logging and compensation rollback failed. Security incident generated (fail-closed).',
+          });
+          return;
+        }
+
         res.status(500).json({
           success: false,
           message: 'Critical audit logging failure: Access approval cancelled (fail-closed).',

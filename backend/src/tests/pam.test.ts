@@ -538,8 +538,9 @@ async function runTests() {
     assert.strictEqual(verifyRestored.body.verification.valid, true);
   });
 
-  // TEST 20: Concurrency in Audit Logging
-  await testStep('20. Concurrency in Audit Logging (Parallel writes preserve sequence & chain)', async () => {
+  // TEST 20: Intra-Process Concurrency in Audit Logging
+  await testStep('20. Intra-Process Concurrency in Audit Logging (Parallel writes in single Node process preserve chain)', async () => {
+    // Tests intra-process concurrent requests within one Node.js process using Promise.all
     const parallelCount = 8;
     const promises = [];
 
@@ -696,6 +697,127 @@ async function runTests() {
     assert.notStrictEqual(res.body.monitoring.vault.version, '1.15.6 Community Edition');
     assert.strictEqual(typeof res.body.monitoring.vault.version, 'string');
     assert.strictEqual(typeof res.body.monitoring.vault.clusterName, 'string');
+  });
+
+  // TEST 26: Audit Failure During Approval Triggers Compensation Rollback
+  await testStep('26. Audit Failure During Approval Triggers Compensation Rollback', async () => {
+    const empUser = await User.findOne({ email: 'employee@vaultguard.local' });
+    const auditFailReq = await AccessRequest.create({
+      requesterId: empUser!._id,
+      accountId: testAccountId,
+      justification: 'Audit failure compensation test scenario',
+      requestedDuration: 25,
+      status: 'Pending',
+    });
+
+    const originalLog = auditService.log;
+    (auditService as any).log = async (params: any) => {
+      if (params.action === 'ACCESS_REQUEST_APPROVED') {
+        throw new Error('SIMULATED_AUDIT_LOG_PERSISTENCE_FAILURE');
+      }
+      return originalLog.call(auditService, params);
+    };
+
+    try {
+      const approveRes = await request(app)
+        .patch(`/api/requests/${auditFailReq._id}/approve`)
+        .set('Cookie', sessions.admin.cookieHeader)
+        .set('X-CSRF-Token', sessions.admin.csrfToken)
+        .send({ approvalComment: 'Audit fail test' });
+
+      assert.strictEqual(approveRes.status, 500);
+      assert.match(approveRes.body.message, /Critical audit logging failure/i);
+
+      // Verify AccessGrant was removed and AccessRequest was rolled back to Pending
+      const grants = await AccessGrant.find({ requestId: auditFailReq._id });
+      assert.strictEqual(grants.length, 0);
+
+      const checkReq = await AccessRequest.findById(auditFailReq._id);
+      assert.strictEqual(checkReq?.status, 'Pending');
+    } finally {
+      auditService.log = originalLog;
+    }
+  });
+
+  // TEST 27: Rollback Failure Triggers Critical Security Incident & Fails Closed
+  await testStep('27. Rollback Failure Triggers Critical Security Incident & Fails Closed', async () => {
+    const empUser = await User.findOne({ email: 'employee@vaultguard.local' });
+    const rollbackFailReq = await AccessRequest.create({
+      requesterId: empUser!._id,
+      accountId: testAccountId,
+      justification: 'Rollback failure critical incident test scenario',
+      requestedDuration: 30,
+      status: 'Pending',
+    });
+
+    const originalCreateGrant = AccessGrant.create;
+    const originalUpdateReq = AccessRequest.updateOne;
+
+    (AccessGrant as any).create = async () => {
+      throw new Error('INITIAL_GRANT_CREATION_FAILURE');
+    };
+    (AccessRequest as any).updateOne = async () => {
+      throw new Error('ROLLBACK_DATABASE_WRITE_FAILURE');
+    };
+
+    try {
+      const approveRes = await request(app)
+        .patch(`/api/requests/${rollbackFailReq._id}/approve`)
+        .set('Cookie', sessions.admin.cookieHeader)
+        .set('X-CSRF-Token', sessions.admin.csrfToken)
+        .send({ approvalComment: 'Rollback failure attempt' });
+
+      assert.strictEqual(approveRes.status, 500);
+      assert.match(approveRes.body.message, /compensation rollback failed/i);
+
+      // Verify high-severity incident was generated
+      const incident = await Incident.findOne({
+        title: /Compensation Rollback Failure/i,
+      }).sort({ createdAt: -1 });
+
+      assert.ok(incident);
+      assert.strictEqual(incident.severity, 'Critical');
+    } finally {
+      AccessGrant.create = originalCreateGrant;
+      AccessRequest.updateOne = originalUpdateReq;
+    }
+  });
+
+  // TEST 28: Orphan Grant Rejection (Credential checkout denied if request is not Approved)
+  await testStep('28. Orphan Grant Rejection (Credential checkout denied if request is not Approved)', async () => {
+    const empUser = await User.findOne({ email: 'employee@vaultguard.local' });
+    const adminUser = await User.findOne({ email: 'admin@vaultguard.local' });
+
+    // Create an unapproved (Pending) request with an orphaned grant
+    const unapprovedReq = await AccessRequest.create({
+      requesterId: empUser!._id,
+      accountId: testAccountId,
+      justification: 'Orphan grant attack simulation',
+      requestedDuration: 30,
+      status: 'Pending', // NOT Approved
+    });
+
+    const orphanGrant = await AccessGrant.create({
+      userId: empUser!._id,
+      accountId: testAccountId,
+      requestId: unapprovedReq._id,
+      approvedBy: adminUser!._id,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      status: 'Active',
+    });
+
+    // Attempt checkout using employee session
+    const res = await request(app)
+      .post(`/api/accounts/${testAccountId}/retrieve`)
+      .set('Cookie', sessions.employee.cookieHeader)
+      .set('X-CSRF-Token', sessions.employee.csrfToken);
+
+    assert.strictEqual(res.status, 403);
+    assert.match(res.body.message, /Associated access request is not approved/i);
+
+    // Clean up orphan test grant and request
+    await AccessGrant.deleteOne({ _id: orphanGrant._id });
+    await AccessRequest.deleteOne({ _id: unapprovedReq._id });
   });
 
   console.log('\n------------------------------------------------------------');

@@ -12,7 +12,11 @@ import { vaultService } from '../services/vault.service';
 import { auditService } from '../services/audit.service';
 
 async function seed() {
-  console.log('[Seed] Initializing enterprise database collections and Vault secrets...');
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('CRITICAL SECURITY GUARD: Seeding synthetic demonstration data is strictly forbidden in production.');
+  }
+
+  console.log('[Seed] Initializing database collections with synthetic demonstration data (LOCAL DEV ONLY)...');
   await connectDatabase();
 
   // Clear existing collections
