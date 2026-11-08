@@ -30,3 +30,4 @@ export default async function handler(req: Request, res: Response) {
   // Delegate request execution to Express application
   return app(req, res);
 }
+

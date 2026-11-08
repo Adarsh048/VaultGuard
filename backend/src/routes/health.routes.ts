@@ -46,7 +46,7 @@ router.get('/ready', async (req: Request, res: Response) => {
       overallHealthy = false;
     } else {
       // Execute lightweight ping
-      await mongoose.connection.db?.admin().ping();
+      await mongoose.connection.db?.command({ ping: 1 });
       const dbLatency = Date.now() - dbStart;
       dependencies.database = {
         status: 'UP',
@@ -142,3 +142,4 @@ router.get('/', (req: Request, res: Response, next) => {
 });
 
 export default router;
+

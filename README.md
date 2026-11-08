@@ -270,8 +270,12 @@ SUMMARY: 28 PASSED, 0 FAILED out of 28 tests.
 | Method | Endpoint | Role | Description |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/auth/login` | Public | Authenticates user and issues HTTP-only cookie + JWT |
+| `POST` | `/api/auth/refresh` | Authenticated | Extends active session and rotates CSRF token |
 | `POST` | `/api/auth/logout` | Authenticated | Clears session cookie and records audit log |
 | `GET` | `/api/auth/me` | Authenticated | Returns current authenticated profile and role |
+| `GET` | `/api/health/live` | Public | Container liveness probe (Node/Express process check) |
+| `GET` | `/api/health/ready` | Public | Dependency readiness probe (pings MongoDB & Vault) |
+| `GET` | `/api/health` | Public | Comprehensive health probe (defaults to readiness) |
 | `GET` | `/api/accounts` | Authenticated | Lists privileged accounts (metadata only) |
 | `POST` | `/api/accounts` | ADMIN | Onboards account & writes secret to Vault KV v2 |
 | `GET` | `/api/accounts/:id` | Authenticated | Retrieves account metadata |
@@ -414,6 +418,43 @@ Serverless functions spin down and freeze execution context, making long-lived s
    vault write -f -field=secret_id auth/approle/role/vaultguard-role/secret-id
    ```
 
+##### Step B: AppRole SecretID Lifecycle & Zero-Downtime Rotation Procedure
+
+> [!IMPORTANT]
+> **Operational Disclosure on SecretID Expiration**:
+> In the standard configuration, `secret_id_ttl` is set to `720h` (30 days). **When the SecretID expires after 30 days, any serverless instance performing an authentication cold start will be rejected by Vault (`400 Bad Request: invalid role or secret ID`) and fail closed.** VaultGuard does **not** claim automated SecretID rotation, as rotating an external root credential requires an external secrets orchestrator.
+
+To execute a **Zero-Downtime SecretID Rotation** before the 30-day window closes:
+
+1. **Mint New SecretID**:
+   Execute the included rotation helper script:
+   ```bash
+   ./vault/scripts/rotate-secret-id.sh "$VAULT_ADMIN_TOKEN"
+   # Or on Windows PowerShell:
+   .\vault\scripts\rotate-secret-id.ps1 -VaultRootToken "$VAULT_ADMIN_TOKEN"
+   ```
+   Vault allows multiple active SecretIDs for the same role simultaneously. Both old and new SecretIDs remain valid during the rotation window.
+2. **Update Vercel Environment Variables**:
+   - Navigate to **Vercel Dashboard** -> Project `vaultguard-api` -> **Settings** -> **Environment Variables**.
+   - Edit `VAULT_SECRET_ID` and replace it with the newly generated SecretID.
+   - Alternatively via Vercel CLI:
+     ```bash
+     printf '%s' "<NEW_SECRET_ID>" | vercel env add VAULT_SECRET_ID production
+     ```
+3. **Trigger Redeployment**:
+   - Redeploy the backend project in Vercel so all incoming serverless containers pick up the updated `VAULT_SECRET_ID`.
+4. **Destroy Old SecretID**:
+   - List existing accessors:
+     ```bash
+     vault list auth/approle/role/vaultguard-role/secret-id
+     ```
+   - Destroy the retired SecretID accessor:
+     ```bash
+     vault write auth/approle/role/vaultguard-role/secret-id-accessor/destroy secret_id_accessor="<OLD_ACCESSOR>"
+     ```
+
+*(Alternative for persistent evaluation environments: set `secret_id_ttl=0` during role creation for a non-expiring SecretID that remains valid until manually destroyed).*
+
 ##### Alternative (Static Token Fallback)
 For local development or persistent container environments, you may alternatively generate a periodic token:
 ```bash
@@ -512,15 +553,28 @@ VaultGuard separates process liveness from external dependency readiness:
 
 ---
 
-### 10.5 Deployment Verification Matrix
+### 10.5 Serverless Rate Limiting Architecture & Limitations
+
+- **In-Memory Rate Limiting as an Intra-Container Circuit Breaker**:
+  - `express-rate-limit` maintains counters in memory. In serverless execution, each concurrent Lambda/Vercel instance maintains its own isolated memory space.
+  - Counters are isolated to each individual container and reset when containers spin down.
+  - This effectively serves as an **intra-container circuit breaker** that halts localized CPU/memory denial-of-service and rapid brute-force loops within a single container.
+- **Enterprise Distributed Rate Limiting**:
+  - For globally synchronized rate limiting across multi-region serverless instances, rate limiting should be deployed at the network edge via **Vercel Firewall / WAF custom rules** or **Cloudflare Rate Limiting**, or backed by an external distributed Redis store (e.g. Upstash Redis).
+  - To avoid introducing unnecessary infrastructure dependencies to a portfolio project, edge rate limiting remains an operational gateway consideration.
+
+---
+
+### 10.6 Deployment Verification Matrix
 
 | Verification Area | Local / Preview Status | Production Cloud Status |
 | :--- | :--- | :--- |
 | **Frontend Production Build** | Verified (`tsc && vite build` $\to$ `dist/` 0 errors) | Ready for Vercel deployment |
 | **Backend Production Build** | Verified (`tsc` $\to$ `dist/` 0 errors) | Ready for Vercel deployment |
-| **PAM Integration Suite** | Verified (32 / 32 tests passed) | Functional test suite validated |
-| **Serverless Function Routing** | Verified (`backend/src/handler.ts` + `api/index.ts` handler tests) | Routes, verbs, headers, cookies compatible |
-| **Vault AppRole Lifecycle** | Verified (Token acquisition, KV read/write, renewal, expiry refresh) | Requires remote Vault endpoint with AppRole |
-| **Health Checks (Live vs Ready)** | Verified (200 on healthy; 503 on degraded Vault) | Ready for external uptime monitoring |
+| **PAM Integration Suite** | Verified (36 / 36 tests passed) | Full functional & failure test suite validated |
+| **Vercel Serverless Routing Matrix** | Verified (`/api/auth/*`, `/api/health/*`, `/api/accounts`, `/api/requests`, `/api/audit`) | Paths, verbs, query params, cookies compatible |
+| **Vault AppRole Lifecycle** | Verified (Token acquisition, KV read/write, proactive renewal, expiry auto-refresh) | Requires remote Vault endpoint with AppRole |
+| **Zero-Downtime SecretID Rotation** | Verified (`vault/scripts/rotate-secret-id.sh` & `.ps1`) | Manual/CI operational procedure documented |
+| **Health Checks (Live vs Ready)** | Verified (200 on healthy; 503 on database or Vault outage) | Ready for external uptime monitoring |
 | **Database Connection Caching** | Verified (`global.mongooseCache` prevents connection storms) | Requires MongoDB Atlas SRV URI |
-| **Live Vercel Deployment** | Pending user deployment initiation | Instructions provided below |
+| **Live Vercel Deployment** | Pending user deployment initiation | Step-by-step instructions provided |

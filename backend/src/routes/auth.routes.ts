@@ -153,6 +153,70 @@ router.post('/logout', authenticate, async (req: AuthenticatedRequest, res: Resp
   }
 });
 
+// POST /api/auth/refresh (Session renewal)
+router.post('/refresh', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Not authenticated' });
+      return;
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user || user.status !== 'active') {
+      res.status(401).json({ success: false, message: 'User account is inactive or deleted' });
+      return;
+    }
+
+    // Generate refreshed JWT and CSRF token
+    const token = jwt.sign(
+      { userId: user._id, role: user.role, email: user.email },
+      config.jwtSecret,
+      { expiresIn: '8h' }
+    );
+    const csrfToken = crypto.randomBytes(32).toString('hex');
+
+    res.cookie('vaultguard_token', token, {
+      httpOnly: true,
+      secure: config.nodeEnv === 'production',
+      sameSite: config.cookieSameSite,
+      path: '/',
+      maxAge: 8 * 60 * 60 * 1000,
+    });
+
+    res.cookie('vaultguard_csrf', csrfToken, {
+      httpOnly: false,
+      secure: config.nodeEnv === 'production',
+      sameSite: config.cookieSameSite,
+      path: '/',
+      maxAge: 8 * 60 * 60 * 1000,
+    });
+
+    await auditService.log({
+      userId: user._id,
+      username: user.name,
+      action: 'SESSION_REFRESH',
+      result: 'SUCCESS',
+      ipAddress: req.ip || '127.0.0.1',
+      metadata: { role: user.role },
+    });
+
+    res.status(200).json({
+      success: true,
+      csrfToken,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+      },
+    });
+  } catch (error) {
+    console.error('[Auth] Refresh error:', error);
+    res.status(500).json({ success: false, message: 'Failed to refresh authentication session' });
+  }
+});
+
 // GET /api/auth/me
 router.get('/me', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   if (!req.user) {

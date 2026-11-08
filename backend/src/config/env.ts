@@ -85,7 +85,7 @@ export const config = {
   vaultAuditLogPath: process.env.VAULT_AUDIT_LOG_PATH
     ? process.env.VAULT_AUDIT_LOG_PATH
     : isProduction
-    ? null
-    : path.resolve(__dirname, '../../../vault/logs/vault_audit.log'),
+      ? null
+      : path.resolve(__dirname, '../../../vault/logs/vault_audit.log'),
   cookieSameSite: (process.env.COOKIE_SAMESITE || 'lax') as 'lax' | 'strict' | 'none',
 };

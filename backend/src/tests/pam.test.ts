@@ -1025,6 +1025,166 @@ async function runTests() {
     assert.strictEqual(forwardedRes.body.check, 'liveness');
   });
 
+  // TEST 33: Authenticated Session Refresh (/api/auth/refresh) & Logout Flow
+  await testStep('33. Authenticated Session Refresh (/api/auth/refresh) & Logout Flow', async () => {
+    // 33a: Refresh without cookie is rejected with 401
+    const unauthRefresh = await request(app).post('/api/auth/refresh');
+    assert.strictEqual(unauthRefresh.status, 401);
+
+    // 33b: Refresh with valid cookie succeeds and returns refreshed session
+    const authRefresh = await request(app)
+      .post('/api/auth/refresh')
+      .set('Cookie', sessions.employee.cookieHeader)
+      .set('X-CSRF-Token', sessions.employee.csrfToken);
+    assert.strictEqual(authRefresh.status, 200);
+    assert.strictEqual(authRefresh.body.success, true);
+    assert.ok(authRefresh.body.csrfToken);
+    assert.strictEqual(authRefresh.body.user.email, 'employee@vaultguard.local');
+    assert.ok(authRefresh.headers['set-cookie']);
+
+    // 33c: Logout clears authentication and CSRF cookies
+    const logoutRes = await request(app)
+      .post('/api/auth/logout')
+      .set('Cookie', sessions.employee.cookieHeader)
+      .set('X-CSRF-Token', sessions.employee.csrfToken);
+    assert.strictEqual(logoutRes.status, 200);
+    assert.strictEqual(logoutRes.body.success, true);
+
+    const rawLogoutCookies = logoutRes.headers['set-cookie'] || [];
+    const logoutCookies: string[] = Array.isArray(rawLogoutCookies) ? rawLogoutCookies : [String(rawLogoutCookies)];
+    assert.ok(
+      logoutCookies.some(
+        (c: string) => c.includes('vaultguard_token=;') || c.includes('vaultguard_token=deleted') || c.includes('Expires=')
+      )
+    );
+  });
+
+  // TEST 34: Comprehensive Vercel Serverless Routing Matrix
+  await testStep('34. Comprehensive Vercel Serverless Routing Matrix (All Key Endpoints Verified)', async () => {
+    const { default: vercelHandler } = await import('../handler');
+    const handlerApp = vercelHandler as any;
+
+    // Login admin to obtain fresh credentials
+    const adminLogin = await request(handlerApp)
+      .post('/api/auth/login')
+      .send({ email: 'admin@vaultguard.local', password: 'AdminPassword!2026' });
+    assert.strictEqual(adminLogin.status, 200);
+
+    const rawCookies = adminLogin.headers['set-cookie'];
+    const cookies: string[] = Array.isArray(rawCookies) ? rawCookies : [String(rawCookies)];
+    const tokenCookie = cookies.find((c: string) => c.startsWith('vaultguard_token='));
+    const csrfCookie = cookies.find((c: string) => c.startsWith('vaultguard_csrf='));
+    const csrfToken = csrfCookie!.split(';')[0].split('=')[1];
+    const cookieHeader = [tokenCookie!.split(';')[0], csrfCookie!.split(';')[0]].join('; ');
+
+    // 34a: GET /api/health/live
+    const live = await request(handlerApp).get('/api/health/live');
+    assert.strictEqual(live.status, 200);
+    assert.strictEqual(live.body.status, 'UP');
+
+    // 34b: GET /api/health/ready
+    const ready = await request(handlerApp).get('/api/health/ready');
+    assert.strictEqual(ready.status, 200);
+    assert.strictEqual(ready.body.dependencies.database.status, 'UP');
+    assert.strictEqual(ready.body.dependencies.vault.status, 'UP');
+
+    // 34c: GET /api/accounts
+    const accounts = await request(handlerApp)
+      .get('/api/accounts')
+      .set('Cookie', cookieHeader);
+    assert.strictEqual(accounts.status, 200);
+    assert.ok(Array.isArray(accounts.body.accounts));
+
+    // 34d: GET /api/requests
+    const requests = await request(handlerApp)
+      .get('/api/requests')
+      .set('Cookie', cookieHeader);
+    assert.strictEqual(requests.status, 200);
+    assert.ok(Array.isArray(requests.body.requests));
+
+    // 34e: GET /api/audit (with query parameters)
+    const audit = await request(handlerApp)
+      .get('/api/audit?limit=5')
+      .set('Cookie', cookieHeader);
+    assert.strictEqual(audit.status, 200);
+    assert.ok(Array.isArray(audit.body.logs));
+
+    // 34f: POST /api/auth/refresh
+    const refresh = await request(handlerApp)
+      .post('/api/auth/refresh')
+      .set('Cookie', cookieHeader)
+      .set('X-CSRF-Token', csrfToken);
+    assert.strictEqual(refresh.status, 200);
+    assert.strictEqual(refresh.body.success, true);
+
+    // 34g: POST /api/auth/logout
+    const logout = await request(handlerApp)
+      .post('/api/auth/logout')
+      .set('Cookie', cookieHeader)
+      .set('X-CSRF-Token', csrfToken);
+    assert.strictEqual(logout.status, 200);
+  });
+
+  // TEST 35: AppRole Expired SecretID & Failure Zero-Credential Leakage
+  await testStep('35. AppRole Expired SecretID Failure Handling & Zero-Credential Leakage', async () => {
+    const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
+      headers: { 'X-Vault-Token': 'root-master-token-vg2026' },
+    });
+    const testRoleId = roleIdRes.data.data.role_id;
+    const expiredSecretId = '00000000-0000-0000-0000-expired00000';
+
+    const originalRoleId = config.vaultRoleId;
+    const originalSecretId = config.vaultSecretId;
+    (config as any).vaultRoleId = testRoleId;
+    (config as any).vaultSecretId = expiredSecretId;
+
+    vaultService._resetCachedStateForTesting();
+
+    try {
+      let threwExpectedError = false;
+      try {
+        await vaultService.getActiveToken();
+      } catch (err: any) {
+        threwExpectedError = true;
+        // Verify failure closed
+        assert.match(err.message, /AppRole authentication failed/i);
+        // Verify sensitive credentials are NOT leaked in error message
+        assert.strictEqual(err.message.includes(expiredSecretId), false);
+        assert.strictEqual(err.message.includes(testRoleId), false);
+      }
+      assert.strictEqual(threwExpectedError, true);
+    } finally {
+      (config as any).vaultRoleId = originalRoleId;
+      (config as any).vaultSecretId = originalSecretId;
+      vaultService._resetCachedStateForTesting();
+    }
+  });
+
+  // TEST 36: Database Dependency Readiness Failure Handling
+  await testStep('36. Database Dependency Readiness Failure Handling (503 on DB Outage)', async () => {
+    const originalCommand = mongoose.connection.db?.command;
+    if (mongoose.connection.db) {
+      mongoose.connection.db.command = (async (cmd: any) => {
+        if (cmd && cmd.ping) {
+          throw new Error('SIMULATED_DATABASE_TIMEOUT_OR_DISCONNECTION');
+        }
+        return originalCommand?.call(mongoose.connection.db, cmd);
+      }) as any;
+    }
+
+    try {
+      const readyRes = await request(app).get('/api/health/ready');
+      assert.strictEqual(readyRes.status, 503);
+      assert.strictEqual(readyRes.body.status, 'DOWN');
+      assert.strictEqual(readyRes.body.dependencies.database.status, 'DOWN');
+      assert.match(readyRes.body.dependencies.database.error, /SIMULATED_DATABASE_TIMEOUT/i);
+    } finally {
+      if (mongoose.connection.db && originalCommand) {
+        mongoose.connection.db.command = originalCommand;
+      }
+    }
+  });
+
   console.log('\n------------------------------------------------------------');
   console.log(`SUMMARY: ${passedCount} PASSED, ${failedCount} FAILED out of ${passedCount + failedCount} tests.`);
   console.log('------------------------------------------------------------\n');
