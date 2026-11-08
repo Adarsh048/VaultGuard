@@ -4,7 +4,8 @@ param(
 )
 
 if (-not $VaultRootToken) {
-    $VaultRootToken = "root-master-token-vg2026"
+    Write-Error "[Vault Init ERROR] Explicit administrative credentials required. Pass -VaultRootToken parameter or set VAULT_TOKEN environment variable."
+    exit 1
 }
 
 $env:VAULT_ADDR = $VaultAddr

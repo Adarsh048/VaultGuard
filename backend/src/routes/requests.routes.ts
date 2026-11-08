@@ -150,7 +150,14 @@ router.patch(
       }
 
       const parseResult = reviewRequestSchema.safeParse(req.body);
-      const approvalComment = parseResult.success ? parseResult.data.approvalComment : '';
+      if (!parseResult.success) {
+        res.status(400).json({
+          success: false,
+          message: parseResult.error.errors[0]?.message || 'Invalid review request input parameters',
+        });
+        return;
+      }
+      const approvalComment = parseResult.data.approvalComment?.trim() || 'Approved by administrator';
 
       // Check existing request state
       const existingRequest = await AccessRequest.findById(req.params.id);
@@ -183,7 +190,7 @@ router.patch(
           $set: {
             status: 'Approved',
             reviewedBy: req.user?._id,
-            approvalComment: approvalComment || 'Approved by administrator',
+            approvalComment,
           },
         },
         { new: true }
@@ -200,32 +207,71 @@ router.patch(
       const now = new Date();
       const expiresAt = new Date(now.getTime() + updatedRequest.requestedDuration * 60 * 1000);
 
-      // Create AccessGrant linked to approved request
-      const grant = await AccessGrant.create({
-        userId: updatedRequest.requesterId,
-        accountId: updatedRequest.accountId,
-        requestId: updatedRequest._id,
-        approvedBy: req.user?._id,
-        expiresAt,
-        status: 'Active',
-      });
-
-      // Audit log
-      await auditService.log({
-        userId: req.user?._id,
-        username: req.user?.name || 'ADMIN',
-        action: 'ACCESS_REQUEST_APPROVED',
-        accountId: (updatedRequest.accountId as any)._id,
-        result: 'SUCCESS',
-        ipAddress: req.ip || '127.0.0.1',
-        metadata: {
+      // Create AccessGrant linked to approved request with compensation rollback
+      let grant: any = null;
+      try {
+        grant = await AccessGrant.create({
+          userId: updatedRequest.requesterId,
+          accountId: updatedRequest.accountId,
           requestId: updatedRequest._id,
-          grantId: grant._id,
-          targetUserId: updatedRequest.requesterId,
-          expiresAt: expiresAt.toISOString(),
-          durationMinutes: updatedRequest.requestedDuration,
-        },
-      });
+          approvedBy: req.user?._id,
+          expiresAt,
+          status: 'Active',
+        });
+      } catch (grantErr: any) {
+        // Rollback request state to Pending so it is not left Approved without an active grant
+        await AccessRequest.updateOne(
+          { _id: updatedRequest._id },
+          {
+            $set: {
+              status: 'Pending',
+              reviewedBy: null,
+              approvalComment: '',
+            },
+          }
+        );
+        res.status(500).json({
+          success: false,
+          message: `Failed to issue access grant: ${grantErr.message}. Request reverted to Pending.`,
+        });
+        return;
+      }
+
+      // Audit log with fail-closed guarantee: If audit fails, revoke grant and rollback request
+      try {
+        await auditService.log({
+          userId: req.user?._id,
+          username: req.user?.name || 'ADMIN',
+          action: 'ACCESS_REQUEST_APPROVED',
+          accountId: (updatedRequest.accountId as any)?._id || updatedRequest.accountId,
+          result: 'SUCCESS',
+          ipAddress: req.ip || '127.0.0.1',
+          metadata: {
+            requestId: updatedRequest._id,
+            grantId: grant._id,
+            targetUserId: updatedRequest.requesterId,
+            expiresAt: expiresAt.toISOString(),
+            durationMinutes: updatedRequest.requestedDuration,
+          },
+        });
+      } catch (auditErr: any) {
+        await AccessGrant.deleteOne({ _id: grant._id });
+        await AccessRequest.updateOne(
+          { _id: updatedRequest._id },
+          {
+            $set: {
+              status: 'Pending',
+              reviewedBy: null,
+              approvalComment: '',
+            },
+          }
+        );
+        res.status(500).json({
+          success: false,
+          message: 'Critical audit logging failure: Access approval cancelled (fail-closed).',
+        });
+        return;
+      }
 
       res.status(200).json({
         success: true,
@@ -252,7 +298,14 @@ router.patch(
       }
 
       const parseResult = reviewRequestSchema.safeParse(req.body);
-      const approvalComment = parseResult.success ? parseResult.data.approvalComment : '';
+      if (!parseResult.success) {
+        res.status(400).json({
+          success: false,
+          message: parseResult.error.errors[0]?.message || 'Invalid review request input parameters',
+        });
+        return;
+      }
+      const approvalComment = parseResult.data.approvalComment?.trim() || 'Rejected by administrator';
 
       const updatedRequest = await AccessRequest.findOneAndUpdate(
         { _id: req.params.id, status: 'Pending' },

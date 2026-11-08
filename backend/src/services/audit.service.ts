@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { Types } from 'mongoose';
-import { AuditLog, AuditResult } from '../models/AuditLog';
+import { AuditLog, AuditResult, IAuditLog } from '../models/AuditLog';
+import { Incident } from '../models/Incident';
 
 export interface LogAuditParams {
   userId?: Types.ObjectId | string | null;
@@ -10,6 +11,19 @@ export interface LogAuditParams {
   result: AuditResult;
   ipAddress?: string;
   metadata?: Record<string, any>;
+}
+
+export interface AuditHashPayload {
+  sequenceNumber: number;
+  timestampIso: string;
+  userIdStr: string;
+  username: string;
+  action: string;
+  result: string;
+  accountIdStr: string;
+  ipAddress: string;
+  metadata: Record<string, any>;
+  previousHash: string;
 }
 
 const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
@@ -60,75 +74,124 @@ export class AuditService {
   private writeMutex: Promise<void> = Promise.resolve();
 
   /**
-   * Calculate SHA-256 hash for an audit record payload
+   * Calculate SHA-256 hash for an audit record payload using canonical JSON serialization
    */
-  calculateHash(payload: {
-    sequenceNumber: number;
-    timestampIso: string;
-    username: string;
-    action: string;
-    result: string;
-    accountIdStr: string;
-    metadata: Record<string, any>;
-    previousHash: string;
-  }): string {
+  calculateHash(payload: AuditHashPayload): string {
     const canonical = canonicalStringify(payload);
     return crypto.createHash('sha256').update(canonical).digest('hex');
   }
 
   /**
-   * Record a non-sensitive audit event with cryptographic hash chaining
+   * Record an audit event with cryptographic SHA-256 hash chaining.
+   * Concurrency-safe: Combines in-process write serialization with database-level
+   * optimistic concurrency control (retries on sequence collision / unique key conflicts).
+   * Observable & Fail-Closed: Propagates persistence errors to callers and logs incidents.
    */
-  async log(params: LogAuditParams): Promise<void> {
-    // Queue writes to ensure sequential sequenceNumber and previousHash consistency
-    return new Promise<void>((resolve) => {
-      this.writeMutex = this.writeMutex.then(async () => {
-        try {
-          const cleanMetadata = recursiveRedact(params.metadata || {});
+  async log(params: LogAuditParams): Promise<IAuditLog> {
+    const maxRetries = 5;
+    const cleanMetadata = recursiveRedact(params.metadata || {});
+    const userIdStr = params.userId ? params.userId.toString() : '';
+    const accountIdStr = params.accountId ? params.accountId.toString() : '';
+    const ipAddress = params.ipAddress || '127.0.0.1';
+    const username = params.username || 'ANONYMOUS';
 
-          // Fetch the latest audit log entry to establish the cryptographic chain link
-          const latestLog = await AuditLog.findOne({ sequenceNumber: { $exists: true, $ne: null } })
-            .sort({ sequenceNumber: -1 })
-            .lean();
-          const sequenceNumber =
-            latestLog && typeof latestLog.sequenceNumber === 'number' && !isNaN(latestLog.sequenceNumber)
-              ? latestLog.sequenceNumber + 1
-              : 1;
-          const previousHash = latestLog?.hash || GENESIS_HASH;
-          const timestamp = new Date();
+    return new Promise<IAuditLog>((resolve, reject) => {
+      this.writeMutex = this.writeMutex
+        .then(async () => {
+          let lastError: any = null;
 
-          const accountIdStr = params.accountId ? params.accountId.toString() : '';
+          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+              // Fetch latest valid record to establish cryptographic chain link
+              const latestLog = await AuditLog.findOne({ sequenceNumber: { $exists: true, $ne: null } })
+                .sort({ sequenceNumber: -1 })
+                .lean();
 
-          const hash = this.calculateHash({
-            sequenceNumber,
-            timestampIso: timestamp.toISOString(),
-            username: params.username || 'ANONYMOUS',
-            action: params.action,
-            result: params.result,
-            accountIdStr,
-            metadata: cleanMetadata,
-            previousHash,
-          });
+              const sequenceNumber =
+                latestLog && typeof latestLog.sequenceNumber === 'number' && !isNaN(latestLog.sequenceNumber)
+                  ? latestLog.sequenceNumber + 1
+                  : 1;
+              const previousHash = latestLog?.hash || GENESIS_HASH;
+              const timestamp = new Date();
 
-          await AuditLog.create({
-            sequenceNumber,
-            userId: params.userId || null,
-            username: params.username || 'ANONYMOUS',
-            action: params.action,
-            accountId: params.accountId || null,
-            result: params.result,
-            ipAddress: params.ipAddress || '127.0.0.1',
-            metadata: cleanMetadata,
-            timestamp,
-            previousHash,
-            hash,
-          });
-        } catch (err) {
-          console.error('[AuditService] Critical failure recording audit log:', err);
-        } finally {
-          resolve();
-        }
-      });
+              const hash = this.calculateHash({
+                sequenceNumber,
+                timestampIso: timestamp.toISOString(),
+                userIdStr,
+                username,
+                action: params.action,
+                result: params.result,
+                accountIdStr,
+                ipAddress,
+                metadata: cleanMetadata,
+                previousHash,
+              });
+
+              const created = await AuditLog.create({
+                sequenceNumber,
+                userId: params.userId || null,
+                username,
+                action: params.action,
+                accountId: params.accountId || null,
+                result: params.result,
+                ipAddress,
+                metadata: cleanMetadata,
+                timestamp,
+                previousHash,
+                hash,
+              });
+
+              resolve(created);
+              return;
+            } catch (err: any) {
+              lastError = err;
+              // Detect MongoDB duplicate key error (code 11000) on sequenceNumber
+              if (err?.code === 11000 || err?.message?.includes('duplicate key')) {
+                // Concurrency race: Jittered backoff and retry sequence allocation
+                const jitterMs = Math.floor(Math.random() * 25) + 10;
+                await new Promise((r) => setTimeout(r, jitterMs));
+                continue;
+              } else {
+                // Non-concurrency error: break immediately
+                break;
+              }
+            }
+          }
+
+          // Persistence failed after retries: Make failure observable
+          const errMsg = `[AuditService] Audit record persistence failed: ${lastError?.message || 'Database error'}`;
+          console.error(errMsg);
+
+          // Observable incident recording without recursive audit logging
+          try {
+            if (params.action !== 'AUDIT_PERSISTENCE_FAILURE') {
+              const year = new Date().getFullYear();
+              const uniqueSuffix = Date.now().toString().slice(-4);
+              await Incident.create({
+                incidentId: `INC-${year}-${uniqueSuffix}`,
+                title: 'Audit Ledger Persistence Failure',
+                description: `Critical: Audit action '${params.action}' for user '${username}' could not be persisted.`,
+                severity: 'High',
+                status: 'Open',
+                investigationNotes: [
+                  {
+                    text: `Audit logging failed: ${lastError?.message || 'Unknown database error'}`,
+                    author: 'AuditService',
+                    timestamp: new Date(),
+                  },
+                ],
+                resolutionDetails: '',
+              });
+            }
+          } catch (incErr) {
+            console.error('[AuditService] Failed to record audit failure incident:', incErr);
+          }
+
+          reject(new Error(errMsg));
+        })
+        .catch((mutexErr) => {
+          reject(mutexErr);
+        });
     });
   }
 
@@ -223,15 +286,20 @@ export class AuditService {
         };
       }
 
-      // Recompute and verify current record hash
+      // Recompute and verify current record hash with complete canonical payload
+      const userIdStr = record.userId ? record.userId.toString() : '';
       const accountIdStr = record.accountId ? record.accountId.toString() : '';
+      const ipAddress = record.ipAddress || '127.0.0.1';
+
       const computedHash = this.calculateHash({
         sequenceNumber: record.sequenceNumber,
         timestampIso: new Date(record.timestamp).toISOString(),
+        userIdStr,
         username: record.username,
         action: record.action,
         result: record.result,
         accountIdStr,
+        ipAddress,
         metadata: record.metadata || {},
         previousHash: record.previousHash,
       });

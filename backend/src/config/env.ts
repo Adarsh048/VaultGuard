@@ -2,25 +2,19 @@ import dotenv from 'dotenv';
 import path from 'path';
 dotenv.config();
 
-// Ensure strong JWT secret without insecure fallbacks
+// Ensure strong JWT secret without insecure fallbacks across ALL environments
 const jwtSecret = process.env.JWT_SECRET;
 if (!jwtSecret || jwtSecret.length < 32) {
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error(
-      'CRITICAL SECURITY ERROR: JWT_SECRET must be set and contain at least 32 characters in production.'
-    );
-  } else if (!jwtSecret) {
-    console.warn(
-      '[SECURITY WARNING] JWT_SECRET is not defined. Using development ephemeral secret. Set a 32+ character JWT_SECRET in .env.'
-    );
-  }
+  throw new Error(
+    'CRITICAL SECURITY CONFIGURATION ERROR: JWT_SECRET environment variable is missing or insecure. It must be explicitly configured with at least 32 characters across all environments.'
+  );
 }
 
 export const config = {
   port: parseInt(process.env.PORT || '5000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   mongoUri: process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/vaultguard',
-  jwtSecret: jwtSecret || 'vaultguard_dev_ephemeral_jwt_secret_must_be_32_characters_long!',
+  jwtSecret: jwtSecret,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
   vaultAddr: process.env.VAULT_ADDR || 'http://127.0.0.1:8200',
   vaultAppToken: process.env.VAULT_APP_TOKEN || '',

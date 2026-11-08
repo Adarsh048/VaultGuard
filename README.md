@@ -1,11 +1,11 @@
 # VaultGuard – Privileged Access Management (PAM) System
 
-> **Enterprise Privileged Account Security & Access Governance Platform**  
+> **Privileged Account Security & Access Governance Platform (Portfolio Project)**  
 > *Secure Privileged Access. Maintain Complete Visibility.*
 
-VaultGuard is an enterprise-grade Privileged Access Management (PAM) platform engineered for centralized privileged account lifecycle management, hardware-grade secrets isolation with HashiCorp Vault KV v2, just-in-time access request and approval governance, cryptographic credential rotation, real-time Vault health monitoring, automated rule-based incident detection, and compliance audit logging.
+VaultGuard is a lightweight, local-first Privileged Access Management (PAM) application engineered to demonstrate practical knowledge of privileged account lifecycle management, hardware-grade secrets isolation with HashiCorp Vault KV v2, just-in-time (JIT) access request and approval governance, cryptographic credential rotation, Vault health telemetry, and tamper-evident audit logging with SHA-256 hash chaining.
 
-The system incorporates core principles of enterprise PAM architectures (such as CyberArk Enterprise Password Vault, Privileged Session Manager, and Central Policy Manager governance models).
+The project models enterprise PAM design patterns inspired by enterprise platforms such as CyberArk (Digital Vault, CPM, PVWA governance workflows) without claiming to be a production CyberArk deployment.
 
 ---
 
@@ -15,7 +15,7 @@ The system incorporates core principles of enterprise PAM architectures (such as
 flowchart TD
     subgraph Client["Presentation Layer (Port 5173)"]
         UI["React 18 + TypeScript + Vite + Tailwind CSS"]
-        AuthContext["Auth Context (JWT via HTTP-only Cookies)"]
+        AuthContext["Auth Context (JWT via HTTP-only Cookies + CSRF)"]
         UI --> AuthContext
     end
 
@@ -23,22 +23,23 @@ flowchart TD
         Express["Express.js + TypeScript Engine"]
         RBAC["RBAC Middleware (ADMIN vs EMPLOYEE)"]
         Limiter["Rate Limiting & Helmet Security"]
+        CSRF["Double-Submit Cookie CSRF Protection"]
         Zod["Zod Schema Validation"]
-        RotationService["Rotation & Reconciliation Engine"]
+        RotationService["Vault KV v2 Rotation Engine"]
         IncidentEngine["Rule-Based Threat & Anomaly Detector"]
-        AuditService["Immutable Audit Service"]
+        AuditService["Tamper-Evident SHA-256 Hash-Chained Audit Ledger"]
 
-        Express --> Limiter --> RBAC --> Zod
+        Express --> Limiter --> CSRF --> RBAC --> Zod
         Express --> RotationService
         Express --> IncidentEngine
         Express --> AuditService
     end
 
     subgraph Secrets["Secrets Management (Port 8200)"]
-        Vault["HashiCorp Vault Community Edition (v1.15.6)"]
+        Vault["HashiCorp Vault Community Edition"]
         KV2["KV Secrets Engine v2 (secret/data/accounts/*)"]
         Policy["Restricted App Policy (vaultguard-app)"]
-        AuditDev["Vault File Audit Device (HMAC Hashed)"]
+        AuditDev["Vault File Audit Device (HMAC Hashed by Vault)"]
         
         Vault --- KV2
         Vault --- Policy
@@ -51,7 +52,7 @@ flowchart TD
         AccountsCol["Privileged Accounts (Secret Paths only)"]
         GrantsCol["Access Grants (Time-Bounded Leases)"]
         IncidentsCol["Incidents (Forensic Notes)"]
-        AuditCol["Audit Log Ledger"]
+        AuditCol["Audit Log Ledger (SHA-256 Hash Chained)"]
 
         MongoDB --- UsersCol
         MongoDB --- AccountsCol
@@ -61,15 +62,15 @@ flowchart TD
     end
 
     AuthContext <--> Express
-    Express <-->|"Vault REST API (App Token)"| Vault
-    Express <-->|"Mongoose ODM (No Cleartext Secrets)"| MongoDB
+    Express <-->|"Vault REST API (Restricted App Token)"| Vault
+    Express <-->|"Mongoose ODM (No Cleartext Passwords)"| MongoDB
 ```
 
 ---
 
 ## 2. Core Security & Architectural Principles
 
-1. **Zero Secret Persistence in MongoDB**:
+1. **Zero Cleartext Secret Persistence in MongoDB**:
    - The application database (`MongoDB`) strictly stores account metadata, ownership, target hostnames, and the Vault reference path (`accounts/acc_<id>`).
    - Plaintext passwords and Vault root tokens are **never** stored in MongoDB or exposed in API responses.
 2. **Fail-Closed Architecture**:
@@ -78,9 +79,11 @@ flowchart TD
    - Administrators cannot approve their own privileged access requests. Approvals require an independent administrator review.
 4. **Server-Enforced Access Grants**:
    - Temporary access grants expire automatically on the backend server. Even if a client bypasses UI timers, the server enforces strict timestamp and revocation checks before contacting Vault.
-5. **Auditing & Secret Redaction**:
-   - The audit service automatically scrubs and redacts fields containing `password`, `token`, `secret`, or `hash` before recording events.
-   - Dual-layer audit trail: Application ledger in MongoDB + cryptographic HMAC audit file in HashiCorp Vault (`/vault/logs/vault_audit.log`).
+5. **Tamper-Evident SHA-256 Hash Chaining**:
+   - Application audit logs are cryptographically linked in a sequential SHA-256 hash chain from Genesis (`0000...0000`). Modifying or deleting any historical log breaks verification.
+   - Separate Vault Audit Device: HashiCorp Vault independently logs its own API interactions via a file audit device using internal HMAC hashing.
+6. **Credential Redaction**:
+   - The audit service automatically scrubs and redacts fields containing `password`, `token`, `secret`, `credential`, `hash`, `cookie`, `auth`, or `private` before recording events.
 
 ---
 
@@ -134,9 +137,9 @@ npm run dev
 
 ---
 
-## 6. Automated Verification Suite (18 Integration Scenarios)
+## 6. Automated Verification Suite (25 Integration Scenarios)
 
-The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 18 security and governance scenarios:
+The project includes an end-to-end integration test suite (`backend/src/tests/pam.test.ts`) covering all 25 security, governance, concurrency, and validation scenarios:
 
 ```bash
 cd backend
@@ -168,9 +171,16 @@ npm test
 [PASS] 16. Input Validation (Malformed ObjectIds return 400 Bad Request)
 [PASS] 17. Vault Health Monitoring (Honest reporting on Vault service status)
 [PASS] 18. Audit Log Zero-Password Redaction & Incident Management
+[PASS] 19. Independent Audit Field Tampering Detection (userId & ipAddress)
+[PASS] 20. Concurrency in Audit Logging (Parallel writes preserve sequence & chain)
+[PASS] 21. Audit Persistence Failure & Observable Error Propagation
+[PASS] 22. Access Request Review Input Validation (Invalid body rejected with 400)
+[PASS] 23. Concurrent Approval Conflict Handling (Atomic state transition)
+[PASS] 24. Approval State-Transition Compensation Rollback on Grant Failure
+[PASS] 25. Real Monitoring Metadata (Actual Vault telemetry returned)
 
 ------------------------------------------------------------
-SUMMARY: 18 PASSED, 0 FAILED out of 18 tests.
+SUMMARY: 25 PASSED, 0 FAILED out of 25 tests.
 ------------------------------------------------------------
 ```
 
@@ -269,3 +279,18 @@ SUMMARY: 18 PASSED, 0 FAILED out of 18 tests.
 | `GET` | `/api/audit/export` | ADMIN | Exports audit ledger to CSV format |
 | `GET` | `/api/dashboard/summary` | Authenticated | Computes high-level PAM KPIs from live database |
 | `GET` | `/api/dashboard/recent-activity` | Authenticated | Fetches recent audit events and open incidents |
+
+---
+
+## 9. Implementation Scope & Architectural Limitations
+
+1. **Vault Secret Rotation vs. Target OS Reconciliation**:
+   - **Implemented**: VaultGuard generates cryptographically secure 32-character passwords, writes new secret versions to HashiCorp Vault KV v2, verifies the secret write, and records rotation history.
+   - **Out of Scope (Honest Disclosure)**: VaultGuard does not deploy local host agents or establish remote network connections (SSH/WMI/RPC/LDAP) to change passwords directly on target Windows Domain Controllers or Linux hosts. The application explicitly flags `targetStatus: 'NOT_IMPLEMENTED'` and `targetPasswordChanged: false`.
+2. **Audit Hash Chain Scope**:
+   - The SHA-256 hash chaining mechanism provides robust tamper-evidence for historical records stored in the application database. An attacker or malicious administrator cannot alter, reorder, or delete past audit logs without breaking the chain.
+   - It is an application-level hash chain; it does not replace distributed Byzantine consensus or write-once optical media (WORM storage). For independent operational logging, HashiCorp Vault's file audit device records HMAC-hashed API events to `/vault/logs/vault_audit.log`.
+3. **Database Concurrency & Transactions**:
+   - State transitions (such as access approvals) use atomic MongoDB operations (`findOneAndUpdate` with state checks) and compensation rollbacks. In standalone local MongoDB instances (without a replica set), multi-document ACID transactions are not enabled; the application employs automatic compensation logic to revert request states if grant issuance or audit logging fails.
+4. **Local-First Architecture**:
+   - Designed for local execution, portfolio demonstration, and security evaluation via Docker or native services. Cloud deployment and managed secrets services (e.g. AWS Secrets Manager, Azure Key Vault) are intentionally excluded.

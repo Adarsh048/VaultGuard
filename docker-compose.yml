@@ -27,7 +27,7 @@ services:
     ports:
       - "8200:8200"
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:-root-master-token-vg2026}
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:?VAULT_DEV_ROOT_TOKEN_ID must be configured explicitly in .env}
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
       VAULT_ADDR: "http://127.0.0.1:8200"
     cap_add:
@@ -59,9 +59,9 @@ services:
       NODE_ENV: development
       PORT: 5000
       MONGO_URI: mongodb://mongodb:27017/vaultguard
-      JWT_SECRET: ${JWT_SECRET:-vaultguard-super-secure-jwt-secret-key-2026-production-grade}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be configured explicitly in .env (minimum 32 characters)}
       VAULT_ADDR: http://vault:8200
-      VAULT_APP_TOKEN: ${VAULT_APP_TOKEN:-}
+      VAULT_APP_TOKEN: ${VAULT_APP_TOKEN:?VAULT_APP_TOKEN must be configured with a restricted application token}
       VAULT_KV_MOUNT: secret
       VAULT_AUDIT_LOG_PATH: /vault/logs/vault_audit.log
       CORS_ORIGIN: http://localhost:5173

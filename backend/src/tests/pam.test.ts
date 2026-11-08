@@ -11,6 +11,7 @@ import { Incident } from '../models/Incident';
 import { AuditLog } from '../models/AuditLog';
 import { RotationHistory } from '../models/RotationHistory';
 import { vaultService } from '../services/vault.service';
+import { auditService } from '../services/audit.service';
 
 interface UserSession {
   cookieHeader: string;
@@ -491,6 +492,210 @@ async function runTests() {
 
     assert.strictEqual(resolveRes.status, 200);
     assert.strictEqual(resolveRes.body.incident.status, 'Resolved');
+  });
+
+  // TEST 19: Independent Audit Field Tampering Detection (userId & ipAddress)
+  await testStep('19. Independent Audit Field Tampering Detection (userId & ipAddress)', async () => {
+    const targetDoc = await AuditLog.findOne({ sequenceNumber: 3 });
+    assert.ok(targetDoc);
+    const originalUserId = targetDoc.userId;
+    const originalIp = targetDoc.ipAddress;
+
+    // 19a: Tamper userId independently
+    const fakeUserId = new mongoose.Types.ObjectId();
+    await AuditLog.updateOne({ _id: targetDoc._id }, { $set: { userId: fakeUserId } });
+
+    const verifyResUserId = await request(app)
+      .get('/api/audit/verify')
+      .set('Cookie', sessions.admin.cookieHeader);
+
+    assert.strictEqual(verifyResUserId.status, 200);
+    assert.strictEqual(verifyResUserId.body.verification.valid, false);
+    assert.strictEqual(verifyResUserId.body.verification.brokenSequence, 3);
+    assert.match(verifyResUserId.body.verification.details, /Payload integrity violation/i);
+
+    // Restore userId
+    await AuditLog.updateOne({ _id: targetDoc._id }, { $set: { userId: originalUserId } });
+
+    // 19b: Tamper ipAddress independently
+    await AuditLog.updateOne({ _id: targetDoc._id }, { $set: { ipAddress: '198.51.100.99' } });
+
+    const verifyResIp = await request(app)
+      .get('/api/audit/verify')
+      .set('Cookie', sessions.admin.cookieHeader);
+
+    assert.strictEqual(verifyResIp.status, 200);
+    assert.strictEqual(verifyResIp.body.verification.valid, false);
+    assert.strictEqual(verifyResIp.body.verification.brokenSequence, 3);
+    assert.match(verifyResIp.body.verification.details, /Payload integrity violation/i);
+
+    // Restore ipAddress
+    await AuditLog.updateOne({ _id: targetDoc._id }, { $set: { ipAddress: originalIp } });
+
+    const verifyRestored = await request(app)
+      .get('/api/audit/verify')
+      .set('Cookie', sessions.admin.cookieHeader);
+    assert.strictEqual(verifyRestored.body.verification.valid, true);
+  });
+
+  // TEST 20: Concurrency in Audit Logging
+  await testStep('20. Concurrency in Audit Logging (Parallel writes preserve sequence & chain)', async () => {
+    const parallelCount = 8;
+    const promises = [];
+
+    for (let i = 0; i < parallelCount; i++) {
+      promises.push(
+        auditService.log({
+          userId: sessions.admin.user._id,
+          username: sessions.admin.user.name,
+          action: `CONCURRENT_TEST_EVENT_${i}`,
+          result: 'SUCCESS',
+          ipAddress: `10.0.0.${i + 1}`,
+          metadata: { parallelBatchId: i },
+        })
+      );
+    }
+
+    const results = await Promise.all(promises);
+    assert.strictEqual(results.length, parallelCount);
+
+    // Verify all sequence numbers are distinct and contiguous
+    const seqs = results.map((r) => r.sequenceNumber).sort((a, b) => a - b);
+    for (let i = 1; i < seqs.length; i++) {
+      assert.strictEqual(seqs[i], seqs[i - 1] + 1);
+    }
+
+    // Verify the entire chain is intact
+    const verifyRes = await request(app)
+      .get('/api/audit/verify')
+      .set('Cookie', sessions.admin.cookieHeader);
+
+    assert.strictEqual(verifyRes.body.verification.valid, true);
+  });
+
+  // TEST 21: Audit Persistence Failure & Observable Error Propagation
+  await testStep('21. Audit Persistence Failure & Observable Error Propagation', async () => {
+    // Attempt logging with invalid result type (violates Mongoose schema enum)
+    let threwError = false;
+    try {
+      await auditService.log({
+        username: 'ErrorTester',
+        action: 'FAIL_TEST',
+        result: 'INVALID_ENUM_VALUE' as any,
+        metadata: {},
+      });
+    } catch (err: any) {
+      threwError = true;
+      assert.match(err.message, /persistence failed/i);
+    }
+    assert.strictEqual(threwError, true);
+  });
+
+  // TEST 22: Access Request Review Input Validation (Zod 400 Validation)
+  await testStep('22. Access Request Review Input Validation (Invalid body rejected with 400)', async () => {
+    // String exceeding 500 characters
+    const oversizedComment = 'x'.repeat(600);
+
+    const approveRes = await request(app)
+      .patch(`/api/requests/${requestId}/approve`)
+      .set('Cookie', sessions.admin.cookieHeader)
+      .set('X-CSRF-Token', sessions.admin.csrfToken)
+      .send({ approvalComment: oversizedComment });
+
+    assert.strictEqual(approveRes.status, 400);
+    assert.match(approveRes.body.message, /at most 500 character|invalid/i);
+
+    const rejectRes = await request(app)
+      .patch(`/api/requests/${requestId}/reject`)
+      .set('Cookie', sessions.admin.cookieHeader)
+      .set('X-CSRF-Token', sessions.admin.csrfToken)
+      .send({ approvalComment: oversizedComment });
+
+    assert.strictEqual(rejectRes.status, 400);
+  });
+
+  // TEST 23: Concurrent Approval Conflict Handling
+  await testStep('23. Concurrent Approval Conflict Handling (Atomic state transition)', async () => {
+    const devUser = await User.findOne({ email: 'developer@vaultguard.local' });
+    const raceReq = await AccessRequest.create({
+      requesterId: devUser!._id,
+      accountId: testAccountId,
+      justification: 'Concurrent race approval test scenario',
+      requestedDuration: 15,
+      status: 'Pending',
+    });
+
+    // Fire two approval calls concurrently
+    const [res1, res2] = await Promise.all([
+      request(app)
+        .patch(`/api/requests/${raceReq._id}/approve`)
+        .set('Cookie', sessions.admin.cookieHeader)
+        .set('X-CSRF-Token', sessions.admin.csrfToken)
+        .send({ approvalComment: 'Concurrent approval attempt 1' }),
+      request(app)
+        .patch(`/api/requests/${raceReq._id}/approve`)
+        .set('Cookie', sessions.admin.cookieHeader)
+        .set('X-CSRF-Token', sessions.admin.csrfToken)
+        .send({ approvalComment: 'Concurrent approval attempt 2' }),
+    ]);
+
+    // Exactly one must succeed (200) and the other must receive 409 Conflict
+    const statuses = [res1.status, res2.status].sort();
+    assert.strictEqual(statuses[0], 200);
+    assert.strictEqual(statuses[1], 409);
+
+    // Verify only ONE grant was created
+    const grantsCount = await AccessGrant.countDocuments({ requestId: raceReq._id });
+    assert.strictEqual(grantsCount, 1);
+  });
+
+  // TEST 24: Approval State-Transition Compensation Rollback on Grant Failure
+  await testStep('24. Approval State-Transition Compensation Rollback on Grant Failure', async () => {
+    const empUser = await User.findOne({ email: 'employee@vaultguard.local' });
+    const rollbackReq = await AccessRequest.create({
+      requesterId: empUser!._id,
+      accountId: testAccountId,
+      justification: 'Rollback compensation test scenario on grant error',
+      requestedDuration: 20,
+      status: 'Pending',
+    });
+
+    // Temporarily mock AccessGrant.create to throw an intentional error
+    const originalCreate = AccessGrant.create;
+    (AccessGrant as any).create = async () => {
+      throw new Error('SIMULATED_GRANT_CREATION_FAILURE');
+    };
+
+    try {
+      const approveRes = await request(app)
+        .patch(`/api/requests/${rollbackReq._id}/approve`)
+        .set('Cookie', sessions.admin.cookieHeader)
+        .set('X-CSRF-Token', sessions.admin.csrfToken)
+        .send({ approvalComment: 'Rollback test attempt' });
+
+      assert.strictEqual(approveRes.status, 500);
+      assert.match(approveRes.body.message, /Failed to issue access grant/i);
+
+      // Verify request status was rolled back to Pending
+      const checkReq = await AccessRequest.findById(rollbackReq._id);
+      assert.strictEqual(checkReq?.status, 'Pending');
+    } finally {
+      // Restore original AccessGrant.create method
+      AccessGrant.create = originalCreate;
+    }
+  });
+
+  // TEST 25: Real Monitoring Metadata (No hardcoded fake fallbacks)
+  await testStep('25. Real Monitoring Metadata (Actual Vault telemetry returned)', async () => {
+    const res = await request(app)
+      .get('/api/monitoring/vault-health')
+      .set('Cookie', sessions.admin.cookieHeader);
+
+    assert.strictEqual(res.status, 200);
+    // Ensure no invented fallback suffix strings like ' Community Edition' are returned
+    assert.notStrictEqual(res.body.monitoring.vault.version, '1.15.6 Community Edition');
+    assert.strictEqual(typeof res.body.monitoring.vault.version, 'string');
+    assert.strictEqual(typeof res.body.monitoring.vault.clusterName, 'string');
   });
 
   console.log('\n------------------------------------------------------------');

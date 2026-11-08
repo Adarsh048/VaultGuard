@@ -98,8 +98,8 @@ export const Monitoring: React.FC = () => {
                 {data ? getStatusBadge(data.vault.status) : <Badge>Checking...</Badge>}
               </div>
               <p className="text-xs text-slate-500 mt-1">
-                Version: {data?.vault?.version || '1.15.6 Community Edition'} • Cluster:{' '}
-                {data?.vault?.clusterName || 'vault-cluster-d30c0321'}
+                Version: {data?.vault?.version || 'Not Available'} • Cluster:{' '}
+                {data?.vault?.clusterName || 'Not Available'}
               </p>
             </div>
 
