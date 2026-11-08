@@ -5,6 +5,12 @@ import { User, IUser } from '../models/User';
 
 export interface AuthenticatedRequest extends Request {
   user?: IUser;
+  tokenPayload?: {
+    userId: string;
+    role?: string;
+    email?: string;
+    sessionStartedAt?: number;
+  };
 }
 
 export async function authenticate(
@@ -25,7 +31,12 @@ export async function authenticate(
       return;
     }
 
-    const decoded = jwt.verify(token, config.jwtSecret) as { userId: string };
+    const decoded = jwt.verify(token, config.jwtSecret) as {
+      userId: string;
+      role?: string;
+      email?: string;
+      sessionStartedAt?: number;
+    };
     const user = await User.findById(decoded.userId);
 
     if (!user) {
@@ -39,6 +50,7 @@ export async function authenticate(
     }
 
     req.user = user;
+    req.tokenPayload = decoded;
     next();
   } catch (error: any) {
     res.status(401).json({ success: false, message: 'Invalid or expired session token.' });

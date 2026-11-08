@@ -65,11 +65,17 @@ router.post('/login', authLimiter, async (req: AuthenticatedRequest, res: Respon
       return;
     }
 
-    // Sign JWT with strong secret
+    // Sign JWT with strong secret and capture initial session start time
+    const sessionStartedAt = Math.floor(Date.now() / 1000);
     const token = jwt.sign(
-      { userId: user._id, role: user.role, email: user.email },
+      {
+        userId: user._id,
+        role: user.role,
+        email: user.email,
+        sessionStartedAt,
+      },
       config.jwtSecret,
-      { expiresIn: '8h' }
+      { expiresIn: (config.jwtExpiresIn || '8h') as any }
     );
 
     // Cryptographically secure random CSRF token
@@ -167,11 +173,30 @@ router.post('/refresh', authenticate, async (req: AuthenticatedRequest, res: Res
       return;
     }
 
-    // Generate refreshed JWT and CSRF token
+    // Protection against indefinite session renewal:
+    // Enforce an absolute maximum session lifetime of 24 hours from initial login.
+    const MAX_SESSION_LIFETIME_SEC = 24 * 60 * 60; // 24 hours
+    const now = Math.floor(Date.now() / 1000);
+    const sessionStartedAt = req.tokenPayload?.sessionStartedAt || now;
+
+    if (now - sessionStartedAt > MAX_SESSION_LIFETIME_SEC) {
+      res.status(401).json({
+        success: false,
+        message: 'Maximum session lifetime exceeded (24 hours). Re-authentication with credentials required.',
+      });
+      return;
+    }
+
+    // Generate refreshed JWT preserving original sessionStartedAt
     const token = jwt.sign(
-      { userId: user._id, role: user.role, email: user.email },
+      {
+        userId: user._id,
+        role: user.role,
+        email: user.email,
+        sessionStartedAt,
+      },
       config.jwtSecret,
-      { expiresIn: '8h' }
+      { expiresIn: (config.jwtExpiresIn || '8h') as any }
     );
     const csrfToken = crypto.randomBytes(32).toString('hex');
 

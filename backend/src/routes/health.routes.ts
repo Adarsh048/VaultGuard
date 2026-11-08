@@ -38,10 +38,8 @@ router.get('/ready', async (req: Request, res: Response) => {
     if (!isConnected) {
       dependencies.database = {
         status: 'DOWN',
-        type: 'MongoDB',
         connected: false,
-        readyState: mongoose.connection.readyState,
-        details: 'Mongoose connection not in ready state.',
+        details: 'Database connection is not in ready state.',
       };
       overallHealthy = false;
     } else {
@@ -50,17 +48,16 @@ router.get('/ready', async (req: Request, res: Response) => {
       const dbLatency = Date.now() - dbStart;
       dependencies.database = {
         status: 'UP',
-        type: 'MongoDB',
         connected: true,
         latencyMs: dbLatency,
       };
     }
   } catch (dbErr: any) {
+    // Sanitize error: never leak internal cluster topology or connection error strings
     dependencies.database = {
       status: 'DOWN',
-      type: 'MongoDB',
       connected: false,
-      error: dbErr.message || 'Database ping failed',
+      details: 'Database service is currently unreachable or unresponsive.',
     };
     overallHealthy = false;
   }
@@ -72,12 +69,12 @@ router.get('/ready', async (req: Request, res: Response) => {
     const vaultLatency = Date.now() - vaultStart;
 
     if (vaultHealth.statusText === 'Healthy') {
+      // Omit software version from unauthenticated health endpoints to prevent CVE fingerprinting
       dependencies.vault = {
         status: 'UP',
         initialized: vaultHealth.initialized,
         sealed: vaultHealth.sealed,
         standby: vaultHealth.standby,
-        version: vaultHealth.version || 'unknown',
         latencyMs: vaultLatency,
       };
     } else if (vaultHealth.statusText === 'Warning') {
@@ -95,15 +92,16 @@ router.get('/ready', async (req: Request, res: Response) => {
         status: 'DOWN',
         initialized: vaultHealth.initialized,
         sealed: vaultHealth.sealed,
-        details: vaultHealth.details || 'Vault endpoint unreachable.',
+        details: 'Vault secrets service is currently unreachable.',
         latencyMs: vaultLatency,
       };
       overallHealthy = false;
     }
   } catch (vaultErr: any) {
+    // Sanitize error: never leak internal Vault addresses or stack traces
     dependencies.vault = {
       status: 'DOWN',
-      error: vaultErr.message || 'Failed to probe Vault',
+      details: 'Failed to communicate with Vault secrets service.',
     };
     overallHealthy = false;
   }

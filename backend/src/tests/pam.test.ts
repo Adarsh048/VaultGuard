@@ -1057,6 +1057,27 @@ async function runTests() {
         (c: string) => c.includes('vaultguard_token=;') || c.includes('vaultguard_token=deleted') || c.includes('Expires=')
       )
     );
+
+    // 33d: Protection against indefinite renewal (>24h absolute lifetime rejected)
+    const empUser = await User.findOne({ email: 'employee@vaultguard.local' });
+    const expiredStartJwt = (await import('jsonwebtoken')).default.sign(
+      {
+        userId: empUser!._id,
+        role: empUser!.role,
+        email: empUser!.email,
+        sessionStartedAt: Math.floor(Date.now() / 1000) - 25 * 60 * 60, // 25 hours ago
+      },
+      config.jwtSecret,
+      { expiresIn: '8h' }
+    );
+
+    const staleCookie = `vaultguard_token=${expiredStartJwt}; vaultguard_csrf=${sessions.employee.csrfToken}`;
+    const staleRefreshRes = await request(app)
+      .post('/api/auth/refresh')
+      .set('Cookie', staleCookie)
+      .set('X-CSRF-Token', sessions.employee.csrfToken);
+    assert.strictEqual(staleRefreshRes.status, 401);
+    assert.match(staleRefreshRes.body.message, /Maximum session lifetime exceeded/i);
   });
 
   // TEST 34: Comprehensive Vercel Serverless Routing Matrix
@@ -1177,7 +1198,7 @@ async function runTests() {
       assert.strictEqual(readyRes.status, 503);
       assert.strictEqual(readyRes.body.status, 'DOWN');
       assert.strictEqual(readyRes.body.dependencies.database.status, 'DOWN');
-      assert.match(readyRes.body.dependencies.database.error, /SIMULATED_DATABASE_TIMEOUT/i);
+      assert.match(readyRes.body.dependencies.database.details, /unreachable or unresponsive/i);
     } finally {
       if (mongoose.connection.db && originalCommand) {
         mongoose.connection.db.command = originalCommand;
