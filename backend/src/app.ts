@@ -4,6 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
 import { config } from './config/env';
+import { connectDatabase } from './config/database';
 import { apiGeneralLimiter } from './middlewares/rateLimiter';
 import { errorHandler } from './middlewares/errorHandler';
 import { csrfProtection } from './middlewares/csrf';
@@ -20,13 +21,32 @@ import dashboardRoutes from './routes/dashboard.routes';
 
 const app = express();
 
+// Configure trust proxy for Vercel edge reverse proxy (trusts immediate upstream hop)
+app.set('trust proxy', 1);
+
 // Security headers with Helmet
 app.use(helmet());
 
-// CORS configuration with credentials support
+// CORS configuration supporting single origin or comma-separated origin list
+const allowedOrigins = config.corsOrigin
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/$/, ''));
+
 app.use(
   cors({
-    origin: config.corsOrigin,
+    origin: (requestOrigin, callback) => {
+      // Allow requests with no origin (e.g. same-origin serverless rewrites, curl, health probes)
+      if (!requestOrigin) return callback(null, true);
+
+      const normalizedOrigin = requestOrigin.replace(/\/$/, '');
+      if (
+        allowedOrigins.includes(normalizedOrigin) ||
+        (!config.isProduction && (normalizedOrigin.includes('localhost') || normalizedOrigin.includes('127.0.0.1')))
+      ) {
+        return callback(null, true);
+      }
+      return callback(new Error(`CORS blocked: Origin '${requestOrigin}' is not permitted.`));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
@@ -42,6 +62,19 @@ app.use(
 app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Ensure database connection is active (handles serverless warm/cold invocations)
+app.use(async (req, res, next) => {
+  try {
+    await connectDatabase();
+    next();
+  } catch (err: any) {
+    res.status(503).json({
+      success: false,
+      message: 'Database service unavailable. Failed to connect to database cluster.',
+    });
+  }
+});
 
 // Apply CSRF protection for state-changing requests
 app.use(csrfProtection);

@@ -310,5 +310,140 @@ SUMMARY: 28 PASSED, 0 FAILED out of 28 tests.
    - It is an application-level hash chain; it does not replace distributed Byzantine consensus or write-once optical media (WORM storage). For independent operational logging, HashiCorp Vault's file audit device records HMAC-hashed API events to `/vault/logs/vault_audit.log`.
 3. **Database Concurrency & Transactions**:
    - State transitions (such as access approvals) use atomic MongoDB operations (`findOneAndUpdate` with state checks) and compensation rollbacks. In standalone local MongoDB instances (without a replica set), multi-document ACID transactions are not enabled; the application employs automatic compensation logic to revert request states if grant issuance or audit logging fails.
-4. **Local-First Architecture**:
-   - Designed for local execution, portfolio demonstration, and security evaluation via Docker or native services. Cloud deployment and managed secrets services (e.g. AWS Secrets Manager, Azure Key Vault) are intentionally excluded.
+4. **Local-First & Serverless Deployment Readiness**:
+   - Designed for local execution, portfolio demonstration, and security evaluation via Docker or native services, and fully prepared for production serverless deployment on Vercel using two decoupled projects (Frontend SPA and Serverless Express API) communicating over a same-origin reverse proxy.
+
+---
+
+## 10. Vercel Deployment Guide (Serverless Architecture)
+
+VaultGuard is pre-configured for seamless production deployment on **Vercel** as two decoupled projects originating from the same GitHub repository (`https://github.com/Adarsh048/VaultGuard`).
+
+### 10.1 Architecture Overview
+
+```mermaid
+flowchart LR
+    Browser["Client Browser"]
+    subgraph Vercel["Vercel Cloud Platform"]
+        Frontend["Project A: VaultGuard Frontend\n(Vite SPA + Same-Origin Proxy)"]
+        Backend["Project B: VaultGuard Backend\n(Serverless Node.js Function)"]
+    end
+    subgraph External["External Managed Services"]
+        Atlas[("MongoDB Atlas\n(Encrypted Database)")]
+        Vault["HashiCorp Vault\n(Remote HTTPS Endpoint)"]
+    end
+
+    Browser -->|"HTTPS (Same-Origin)"| Frontend
+    Frontend -->|"Rewrite /api/* to backend"| Backend
+    Backend -->|"Mongoose TLS (Connection Cached)"| Atlas
+    Backend -->|"REST API over HTTPS (App Token)"| Vault
+```
+
+- **Same-Origin API Proxy**: `frontend/vercel.json` proxies all `/api/:path*` requests directly to the deployed backend URL. This ensures `SameSite=Lax` and `HttpOnly` security cookies (`vaultguard_token`, `vaultguard_csrf`) are set on the frontend domain without third-party cookie restrictions or cross-origin issues.
+- **Serverless Connection Caching**: `backend/src/config/database.ts` uses a global Mongoose connection cache (`global.mongooseCache`) to reuse active database sockets across warm lambda invocations and prevent connection exhaustion on MongoDB Atlas.
+- **Fail-Closed Production Guardrails**: `backend/src/config/env.ts` enforces non-localhost Atlas URIs, strictly HTTPS Vault endpoints, minimum 32-character JWT secrets, and prohibits synthetic data seeding in production.
+
+---
+
+### 10.2 External Services Setup (Prerequisites)
+
+#### 1. MongoDB Atlas Setup
+1. Create a free or dedicated cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).
+2. Create a database user with read/write privileges on the `vaultguard` database.
+3. Under **Network Access**, add `0.0.0.0/0` (Allow Access from Anywhere) because Vercel serverless functions execute from dynamic IP pools.
+4. Copy the SRV connection string:
+   ```text
+   mongodb+srv://<username>:<password>@cluster0.xxxx.mongodb.net/vaultguard?retryWrites=true&w=majority
+   ```
+
+#### 2. Remote HashiCorp Vault Setup
+Because HashiCorp Vault is a persistent cryptographic daemon, it must run on a persistent HTTPS endpoint (e.g. [HashiCorp Cloud Platform (HCP) Vault](https://cloud.hashicorp.com/products/vault), Fly.io, Railway, or a hardened VPS).
+
+1. Ensure Vault has KV v2 enabled at `secret/`.
+2. Apply the `vaultguard-app` policy (`vault/policies/vaultguard-app-policy.hcl`):
+   ```bash
+   vault policy write vaultguard-app vault/policies/vaultguard-app-policy.hcl
+   ```
+3. Generate a restricted application token:
+   ```bash
+   vault token create -policy=vaultguard-app -period=720h -orphan -display-name="vaultguard-prod-api"
+   ```
+4. Note your HTTPS Vault address (e.g. `https://vault.yourdomain.com:8200` or HCP Vault URL) and the generated application token.
+
+---
+
+### 10.3 Project Deployment on Vercel
+
+Import the repository (`https://github.com/Adarsh048/VaultGuard`) twice in the [Vercel Dashboard](https://vercel.com/new).
+
+#### Step 1: Deploy Backend (Project B)
+1. In Vercel, select **Add New Project** and choose `VaultGuard`.
+2. Configure **Project Settings**:
+   - **Project Name**: `vaultguard-api` (or preferred name)
+   - **Root Directory**: Click *Edit* and select `backend`
+   - **Framework Preset**: `Other`
+   - **Build Command**: *(leave empty / default)*
+   - **Output Directory**: *(leave empty / default)*
+3. Configure **Environment Variables**:
+   | Variable | Value | Description |
+   | :--- | :--- | :--- |
+   | `NODE_ENV` | `production` | Enables strict production security mode |
+   | `JWT_SECRET` | *(Random 32+ character string)* | Signs and verifies user authentication tokens |
+   | `JWT_EXPIRES_IN` | `8h` | Token expiration duration |
+   | `MONGO_URI` | `mongodb+srv://...` | MongoDB Atlas remote connection string |
+   | `VAULT_ADDR` | `https://vault.yourdomain.com:8200` | Remote HTTPS HashiCorp Vault address |
+   | `VAULT_APP_TOKEN` | `s.xxxxxxxxxxxxxx` | Restricted token with `vaultguard-app` policy |
+   | `VAULT_KV_MOUNT` | `secret` | Vault KV v2 mount path |
+   | `CORS_ORIGIN` | `https://vaultguard-frontend.vercel.app` | Frontend production origin (update after step 2) |
+   | `COOKIE_SAMESITE` | `lax` | Cookie SameSite attribute |
+4. Click **Deploy**. Note the assigned backend URL (e.g., `https://vaultguard-api.vercel.app`).
+
+---
+
+#### Step 2: Deploy Frontend (Project A)
+1. In `frontend/vercel.json`, update the rewrite destination URL with your deployed backend address:
+   ```json
+   {
+     "rewrites": [
+       {
+         "source": "/api/:path*",
+         "destination": "https://vaultguard-api.vercel.app/api/:path*"
+       },
+       {
+         "source": "/(.*)",
+         "destination": "/index.html"
+       }
+     ]
+   }
+   ```
+2. In Vercel, select **Add New Project** and choose `VaultGuard`.
+3. Configure **Project Settings**:
+   - **Project Name**: `vaultguard-web`
+   - **Root Directory**: Click *Edit* and select `frontend`
+   - **Framework Preset**: `Vite`
+   - **Build Command**: `npm run build`
+   - **Output Directory**: `dist`
+4. Configure **Environment Variables**:
+   *(No required variables: the frontend communicates with `/api` through the same-origin Vercel rewrite proxy).*
+5. Click **Deploy**. Note the assigned frontend URL (e.g., `https://vaultguard-web.vercel.app`).
+6. *(Post-Deployment Alignment)*: Return to Project B (**vaultguard-api**) -> **Settings** -> **Environment Variables**, ensure `CORS_ORIGIN` matches your production frontend URL (`https://vaultguard-web.vercel.app`), and redeploy if needed.
+
+---
+
+### 10.4 Post-Deployment Verification Checklist
+
+1. **Health Check**:
+   - Navigate to `https://vaultguard-api.vercel.app/api/health`.
+   - Verify it responds with HTTP 200:
+     ```json
+     { "status": "healthy", "service": "VaultGuard PAM API", "environment": "production" }
+     ```
+2. **Same-Origin Proxy Verification**:
+   - Open browser DevTools Network tab on `https://vaultguard-web.vercel.app`.
+   - Verify requests to `/api/auth/me` return 401 (Unauthenticated) from the same host without CORS errors.
+3. **Authentication & Session**:
+   - Create an initial administrative user via the registration or administrative provisioning workflow.
+   - Verify that logging in sets `vaultguard_token` and `vaultguard_csrf` with `HttpOnly`, `Secure`, `SameSite=Lax`, and `Path=/`.
+4. **Secrets Isolation & Audit Integrity**:
+   - Onboard a test privileged account and retrieve credentials with an approved grant.
+   - Verify that Vault KV v2 receives the secret and the SHA-256 audit ledger passes verification (`GET /api/audit/verify`).

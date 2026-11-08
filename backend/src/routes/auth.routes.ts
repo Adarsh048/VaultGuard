@@ -80,6 +80,7 @@ router.post('/login', authLimiter, async (req: AuthenticatedRequest, res: Respon
       httpOnly: true,
       secure: config.nodeEnv === 'production',
       sameSite: config.cookieSameSite,
+      path: '/',
       maxAge: 8 * 60 * 60 * 1000, // 8 hours
     });
 
@@ -88,6 +89,7 @@ router.post('/login', authLimiter, async (req: AuthenticatedRequest, res: Respon
       httpOnly: false,
       secure: config.nodeEnv === 'production',
       sameSite: config.cookieSameSite,
+      path: '/',
       maxAge: 8 * 60 * 60 * 1000,
     });
 
@@ -135,12 +137,14 @@ router.post('/logout', authenticate, async (req: AuthenticatedRequest, res: Resp
       httpOnly: true,
       secure: config.nodeEnv === 'production',
       sameSite: config.cookieSameSite,
+      path: '/',
     });
 
     res.clearCookie('vaultguard_csrf', {
       httpOnly: false,
       secure: config.nodeEnv === 'production',
       sameSite: config.cookieSameSite,
+      path: '/',
     });
 
     res.status(200).json({ success: true, message: 'Successfully logged out' });

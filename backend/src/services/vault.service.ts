@@ -77,6 +77,9 @@ export class VaultService {
    * Path example: accounts/{accountId}
    */
   async storeSecret(secretSubPath: string, payload: Record<string, any>): Promise<{ version: number }> {
+    if (!config.vaultAppToken) {
+      throw new Error('Vault access failed closed: VAULT_APP_TOKEN is not configured.');
+    }
     try {
       const url = `/${config.vaultKvMount}/data/${secretSubPath}`;
       const res = await this.client.post(url, {
@@ -95,6 +98,9 @@ export class VaultService {
    * Retrieve privileged credentials from Vault KV v2 engine
    */
   async getSecret(secretSubPath: string): Promise<Record<string, any>> {
+    if (!config.vaultAppToken) {
+      throw new Error('Vault access failed closed: VAULT_APP_TOKEN is not configured.');
+    }
     try {
       const url = `/${config.vaultKvMount}/data/${secretSubPath}`;
       const res = await this.client.get(url);
@@ -113,6 +119,9 @@ export class VaultService {
    * Permanently delete secret metadata and all versions
    */
   async deleteSecret(secretSubPath: string): Promise<boolean> {
+    if (!config.vaultAppToken) {
+      throw new Error('Vault access failed closed: VAULT_APP_TOKEN is not configured.');
+    }
     try {
       const url = `/${config.vaultKvMount}/metadata/${secretSubPath}`;
       await this.client.delete(url);
