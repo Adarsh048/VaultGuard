@@ -18,6 +18,7 @@ import monitoringRoutes from './routes/monitoring.routes';
 import incidentsRoutes from './routes/incidents.routes';
 import auditRoutes from './routes/audit.routes';
 import dashboardRoutes from './routes/dashboard.routes';
+import healthRoutes from './routes/health.routes';
 
 const app = express();
 
@@ -86,14 +87,8 @@ if (config.nodeEnv !== 'test') {
 // Rate limiting on API routes
 app.use('/api', apiGeneralLimiter);
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'UP',
-    timestamp: new Date().toISOString(),
-    service: 'VaultGuard PAM API',
-  });
-});
+// Health check endpoints (liveness probe at /api/health/live, readiness probe at /api/health/ready or /api/health)
+app.use('/api/health', healthRoutes);
 
 // Mount Routes
 app.use('/api/auth', authRoutes);

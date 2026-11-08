@@ -1,8 +1,10 @@
 import assert from 'assert';
+import axios from 'axios';
 import request from 'supertest';
 import mongoose, { Types } from 'mongoose';
 import app from '../app';
 import { connectDatabase, disconnectDatabase } from '../config/database';
+import { config } from '../config/env';
 import { User } from '../models/User';
 import { PrivilegedAccount } from '../models/PrivilegedAccount';
 import { AccessRequest } from '../models/AccessRequest';
@@ -818,6 +820,209 @@ async function runTests() {
     // Clean up orphan test grant and request
     await AccessGrant.deleteOne({ _id: orphanGrant._id });
     await AccessRequest.deleteOne({ _id: unapprovedReq._id });
+  });
+
+  // TEST 29: Production Health Checks (Liveness vs Dependency Readiness)
+  await testStep('29. Production Health Checks (Liveness vs Dependency Readiness)', async () => {
+    // 29a: Liveness probe always succeeds if process is alive
+    const liveRes = await request(app).get('/api/health/live');
+    assert.strictEqual(liveRes.status, 200);
+    assert.strictEqual(liveRes.body.status, 'UP');
+    assert.strictEqual(liveRes.body.check, 'liveness');
+    assert.strictEqual(typeof liveRes.body.uptimeSeconds, 'number');
+
+    // 29b: Readiness probe verifies both database and Vault
+    const readyRes = await request(app).get('/api/health/ready');
+    assert.strictEqual(readyRes.status, 200);
+    assert.strictEqual(readyRes.body.status, 'UP');
+    assert.strictEqual(readyRes.body.check, 'readiness');
+    assert.strictEqual(readyRes.body.dependencies.database.status, 'UP');
+    assert.strictEqual(readyRes.body.dependencies.vault.status, 'UP');
+
+    // 29c: Default /api/health runs readiness probe
+    const defaultRes = await request(app).get('/api/health');
+    assert.strictEqual(defaultRes.status, 200);
+    assert.strictEqual(defaultRes.body.check, 'readiness');
+
+    // 29d: Simulated Vault outage fails readiness probe honestly with HTTP 503
+    const originalGetHealth = vaultService.getHealth;
+    vaultService.getHealth = async () => ({
+      initialized: false,
+      sealed: true,
+      standby: false,
+      statusCode: 0,
+      statusText: 'Unavailable',
+      lastChecked: new Date(),
+      details: 'Simulated connection refusal to Vault',
+    });
+
+    try {
+      const degradedRes = await request(app).get('/api/health/ready');
+      assert.strictEqual(degradedRes.status, 503);
+      assert.strictEqual(degradedRes.body.status, 'DOWN');
+      assert.strictEqual(degradedRes.body.dependencies.vault.status, 'DOWN');
+    } finally {
+      vaultService.getHealth = originalGetHealth;
+    }
+  });
+
+  // TEST 30: Vault AppRole Authentication & Token Renewal Engine
+  await testStep('30. Vault AppRole Authentication & Token Renewal Engine', async () => {
+    // Read local AppRole role_id and secret_id from local Vault instance
+    const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
+      headers: { 'X-Vault-Token': 'root-master-token-vg2026' },
+    });
+    const testRoleId = roleIdRes.data.data.role_id;
+
+    const secretIdRes = await axios.post(
+      `${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/secret-id`,
+      {},
+      { headers: { 'X-Vault-Token': 'root-master-token-vg2026' } }
+    );
+    const testSecretId = secretIdRes.data.data.secret_id;
+
+    // Temporarily configure config with AppRole credentials
+    const originalRoleId = config.vaultRoleId;
+    const originalSecretId = config.vaultSecretId;
+    (config as any).vaultRoleId = testRoleId;
+    (config as any).vaultSecretId = testSecretId;
+
+    vaultService._resetCachedStateForTesting();
+
+    try {
+      // 30a: Verify AppRole login
+      const token = await vaultService.getActiveToken();
+      assert.ok(token);
+      assert.strictEqual(typeof token, 'string');
+      assert.ok(token.length > 10);
+
+      const status = vaultService.getAuthStatus();
+      assert.strictEqual(status.authMethod, 'approle');
+      assert.strictEqual(status.authenticated, true);
+      assert.strictEqual(status.renewable, true);
+
+      // 30b: Verify Token Renewal
+      const renewResult = await vaultService.renewToken();
+      assert.strictEqual(renewResult.renewed, true);
+      assert.ok(renewResult.ttl > 0);
+
+      // 30c: Verify Vault KV read/write using AppRole token
+      const writeRes = await vaultService.storeSecret('accounts/approle-test', {
+        username: 'approle_user',
+        password: 'secureAppRolePassword123!',
+      });
+      assert.ok(writeRes.version >= 1);
+
+      const readRes = await vaultService.getSecret('accounts/approle-test');
+      assert.strictEqual(readRes.username, 'approle_user');
+      assert.strictEqual(readRes.password, 'secureAppRolePassword123!');
+
+      await vaultService.deleteSecret('accounts/approle-test');
+    } finally {
+      (config as any).vaultRoleId = originalRoleId;
+      (config as any).vaultSecretId = originalSecretId;
+      vaultService._resetCachedStateForTesting();
+    }
+  });
+
+  // TEST 31: Vault AppRole Token Expiry & Automatic Refresh / Failure Handling
+  await testStep('31. Vault AppRole Token Expiry & Failure Handling', async () => {
+    const roleIdRes = await axios.get(`${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/role-id`, {
+      headers: { 'X-Vault-Token': 'root-master-token-vg2026' },
+    });
+    const testRoleId = roleIdRes.data.data.role_id;
+
+    const secretIdRes = await axios.post(
+      `${config.vaultAddr}/v1/auth/approle/role/vaultguard-role/secret-id`,
+      {},
+      { headers: { 'X-Vault-Token': 'root-master-token-vg2026' } }
+    );
+    const testSecretId = secretIdRes.data.data.secret_id;
+
+    const originalRoleId = config.vaultRoleId;
+    const originalSecretId = config.vaultSecretId;
+    (config as any).vaultRoleId = testRoleId;
+    (config as any).vaultSecretId = testSecretId;
+
+    vaultService._resetCachedStateForTesting();
+
+    try {
+      // Authenticate initial token
+      const initialToken = await vaultService.getActiveToken();
+      assert.ok(initialToken);
+
+      // 31a: Inject simulated token expiration
+      vaultService._setTokenExpiryForTesting(Date.now() - 5000);
+
+      // Subsequent call should auto-refresh and succeed
+      const refreshedToken = await vaultService.getActiveToken();
+      assert.ok(refreshedToken);
+
+      // 31b: Invalid SecretID fails closed
+      (config as any).vaultSecretId = '00000000-0000-0000-0000-000000000000';
+      vaultService._resetCachedStateForTesting();
+
+      let failedClosed = false;
+      try {
+        await vaultService.getActiveToken();
+      } catch (err: any) {
+        failedClosed = true;
+        assert.match(err.message, /AppRole authentication failed/i);
+      }
+      assert.strictEqual(failedClosed, true);
+    } finally {
+      (config as any).vaultRoleId = originalRoleId;
+      (config as any).vaultSecretId = originalSecretId;
+      vaultService._resetCachedStateForTesting();
+    }
+  });
+
+  // TEST 32: Vercel Serverless Function Handler Compatibility (All HTTP Methods & Proxy Features)
+  await testStep('32. Vercel Serverless Function Handler Compatibility (All HTTP Methods & Proxy Features)', async () => {
+    // Import Vercel serverless function entry handler from src/handler
+    const { default: vercelHandler } = await import('../handler');
+    const handlerApp = vercelHandler as any;
+
+    // 32a: GET health check through Vercel handler
+    const healthRes = await request(handlerApp).get('/api/health');
+    assert.strictEqual(healthRes.status, 200);
+    assert.strictEqual(healthRes.body.status, 'UP');
+
+    // 32b: POST auth login with body and cookies through Vercel handler
+    const loginRes = await request(handlerApp)
+      .post('/api/auth/login')
+      .send({
+        email: 'employee@vaultguard.local',
+        password: 'EmployeePassword!2026',
+      });
+    assert.strictEqual(loginRes.status, 200);
+    assert.strictEqual(loginRes.body.success, true);
+    assert.ok(loginRes.headers['set-cookie']);
+
+    // Extract cookie
+    const rawCookies = loginRes.headers['set-cookie'];
+    const cookies: string[] = Array.isArray(rawCookies) ? rawCookies : [String(rawCookies)];
+    const tokenCookie = cookies.find((c: string) => c.startsWith('vaultguard_token='));
+    const csrfCookie = cookies.find((c: string) => c.startsWith('vaultguard_csrf='));
+    assert.ok(tokenCookie);
+    assert.ok(csrfCookie);
+
+    const csrfToken = csrfCookie.split(';')[0].split('=')[1];
+    const cookieHeader = [tokenCookie.split(';')[0], csrfCookie.split(';')[0]].join('; ');
+
+    // 32c: GET requests with query parameters through Vercel handler
+    const queryRes = await request(handlerApp)
+      .get('/api/requests/my?status=Approved')
+      .set('Cookie', cookieHeader);
+    assert.strictEqual(queryRes.status, 200);
+    assert.ok(Array.isArray(queryRes.body.requests));
+
+    // 32d: Path restoration when Vercel provides x-forwarded-url header
+    const forwardedRes = await request(handlerApp)
+      .get('/api/index')
+      .set('x-forwarded-url', '/api/health/live');
+    assert.strictEqual(forwardedRes.status, 200);
+    assert.strictEqual(forwardedRes.body.check, 'liveness');
   });
 
   console.log('\n------------------------------------------------------------');

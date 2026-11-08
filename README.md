@@ -345,30 +345,82 @@ flowchart LR
 
 ---
 
-### 10.2 External Services Setup (Prerequisites)
+### 10.2 External Services Setup (Prerequisites & Network Security)
 
-#### 1. MongoDB Atlas Setup
-1. Create a free or dedicated cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).
-2. Create a database user with read/write privileges on the `vaultguard` database.
-3. Under **Network Access**, add `0.0.0.0/0` (Allow Access from Anywhere) because Vercel serverless functions execute from dynamic IP pools.
-4. Copy the SRV connection string:
-   ```text
-   mongodb+srv://<username>:<password>@cluster0.xxxx.mongodb.net/vaultguard?retryWrites=true&w=majority
-   ```
+#### 1. MongoDB Atlas Setup & Network Access Control
 
-#### 2. Remote HashiCorp Vault Setup
-Because HashiCorp Vault is a persistent cryptographic daemon, it must run on a persistent HTTPS endpoint (e.g. [HashiCorp Cloud Platform (HCP) Vault](https://cloud.hashicorp.com/products/vault), Fly.io, Railway, or a hardened VPS).
+> [!WARNING]
+> **Enterprise Security Warning on IP Allowlisting (`0.0.0.0/0`)**:
+> Opening MongoDB Atlas to `0.0.0.0/0` (Anywhere) allows connection attempts to port 27017 from the public internet. This must **never** be used in enterprise production environments.
+
+##### Production Network Allowlisting Strategies (Vercel Outbound IPs)
+Standard Vercel Serverless Functions execute on dynamic multi-tenant AWS Lambda pools with rotating outbound IP addresses. For production environments, employ one of the following architectures:
+
+1. **Vercel Secure Compute (Recommended for Enterprise)**:
+   - Assigns dedicated egress IP addresses and dedicated VPC networking to Vercel projects.
+   - Add the provisioned static egress IPs directly to the MongoDB Atlas **Network Access** IP Access List.
+2. **Static Egress Proxy**:
+   - Route outbound database connections through a dedicated static NAT proxy (e.g. QuotaGuard Static or an AWS NAT Gateway).
+   - Allowlist only the proxy's fixed static IP addresses in Atlas.
+3. **AWS VPC Peering / AWS PrivateLink**:
+   - If hosting on a dedicated Atlas tier (M10+) and AWS infrastructure, configure VPC Peering or AWS PrivateLink to keep all traffic private without public IP traversal.
+
+##### Temporary Demo-Only Alternative (Portfolio / Evaluation Setup)
+If evaluating this project on free/hobby tiers where dedicated static egress IPs are unavailable:
+- You may temporarily permit access in **Network Access** (`0.0.0.0/0`) for the duration of the evaluation.
+- **Mandatory Compensating Controls**:
+  - Enforce SCRAM-SHA-256 database authentication with a $\ge 32$-character high-entropy cryptographic password.
+  - Create a least-privilege database user restricted strictly to `readWrite` on the `vaultguard` database (zero `dbAdmin`, `clusterAdmin`, or `atlasAdmin` permissions).
+  - Enable MongoDB Atlas multi-factor authentication (MFA) on all administrator accounts.
+  - Remove `0.0.0.0/0` immediately after evaluation concludes.
+
+Copy the Atlas SRV connection string:
+```text
+mongodb+srv://<username>:<password>@cluster0.xxxx.mongodb.net/vaultguard?retryWrites=true&w=majority
+```
+
+---
+
+#### 2. Remote HashiCorp Vault Setup (AppRole Authentication)
+
+Because HashiCorp Vault is a persistent cryptographic service, it must run on a persistent HTTPS endpoint (e.g. [HashiCorp Cloud Platform (HCP) Vault](https://cloud.hashicorp.com/products/vault), Fly.io, Railway, or a hardened VPS with TLS).
+
+##### Step A: Enable AppRole Authentication (Serverless-Compatible)
+Serverless functions spin down and freeze execution context, making long-lived static tokens vulnerable to silent expiration without background renewal. VaultGuard implements **Vault AppRole Authentication** with short-lived (1-hour) tokens, automated proactive renewal, and re-authentication on expiration.
 
 1. Ensure Vault has KV v2 enabled at `secret/`.
 2. Apply the `vaultguard-app` policy (`vault/policies/vaultguard-app-policy.hcl`):
    ```bash
    vault policy write vaultguard-app vault/policies/vaultguard-app-policy.hcl
    ```
-3. Generate a restricted application token:
+3. Enable the AppRole auth method:
    ```bash
-   vault token create -policy=vaultguard-app -period=720h -orphan -display-name="vaultguard-prod-api"
+   vault auth enable approle
    ```
-4. Note your HTTPS Vault address (e.g. `https://vault.yourdomain.com:8200` or HCP Vault URL) and the generated application token.
+4. Configure the `vaultguard-role`:
+   ```bash
+   vault write auth/approle/role/vaultguard-role \
+     token_policies="vaultguard-app" \
+     token_ttl="1h" \
+     token_max_ttl="24h" \
+     secret_id_ttl="720h"
+   ```
+5. Retrieve the static `role_id`:
+   ```bash
+   vault read -field=role_id auth/approle/role/vaultguard-role/role-id
+   ```
+6. Mint a `secret_id` (record securely; never commit or expose to frontend):
+   ```bash
+   vault write -f -field=secret_id auth/approle/role/vaultguard-role/secret-id
+   ```
+
+##### Alternative (Static Token Fallback)
+For local development or persistent container environments, you may alternatively generate a periodic token:
+```bash
+vault token create -policy=vaultguard-app -period=720h -orphan -display-name="vaultguard-prod-api"
+```
+> [!NOTE]
+> In serverless production, **AppRole authentication (`VAULT_ROLE_ID` and `VAULT_SECRET_ID`) is strongly recommended**. If a periodic token is used without an active daemon process to renew it, it will expire after 720 hours of inactivity.
 
 ---
 
@@ -392,9 +444,11 @@ Import the repository (`https://github.com/Adarsh048/VaultGuard`) twice in the [
    | `JWT_EXPIRES_IN` | `8h` | Token expiration duration |
    | `MONGO_URI` | `mongodb+srv://...` | MongoDB Atlas remote connection string |
    | `VAULT_ADDR` | `https://vault.yourdomain.com:8200` | Remote HTTPS HashiCorp Vault address |
-   | `VAULT_APP_TOKEN` | `s.xxxxxxxxxxxxxx` | Restricted token with `vaultguard-app` policy |
+   | `VAULT_ROLE_ID` | `<approle-role-id>` | **(Recommended)** AppRole Role ID for auto-renewing tokens |
+   | `VAULT_SECRET_ID` | `<approle-secret-id>` | **(Recommended)** AppRole Secret ID |
+   | `VAULT_APP_TOKEN` | `<restricted-app-token>` | *(Fallback if AppRole not used)* |
    | `VAULT_KV_MOUNT` | `secret` | Vault KV v2 mount path |
-   | `CORS_ORIGIN` | `https://vaultguard-frontend.vercel.app` | Frontend production origin (update after step 2) |
+   | `CORS_ORIGIN` | `https://vaultguard-web.vercel.app` | Frontend production origin (update after Step 2) |
    | `COOKIE_SAMESITE` | `lax` | Cookie SameSite attribute |
 4. Click **Deploy**. Note the assigned backend URL (e.g., `https://vaultguard-api.vercel.app`).
 
@@ -430,20 +484,43 @@ Import the repository (`https://github.com/Adarsh048/VaultGuard`) twice in the [
 
 ---
 
-### 10.4 Post-Deployment Verification Checklist
+### 10.4 Production Health Checks & Monitoring Probes
 
-1. **Health Check**:
-   - Navigate to `https://vaultguard-api.vercel.app/api/health`.
-   - Verify it responds with HTTP 200:
+VaultGuard separates process liveness from external dependency readiness:
+
+1. **Liveness Probe (`GET /api/health/live`)**:
+   - Verifies the Node.js / Express serverless container is alive and responding to event loops.
+   - Returns HTTP 200:
      ```json
-     { "status": "healthy", "service": "VaultGuard PAM API", "environment": "production" }
+     { "status": "UP", "check": "liveness", "uptimeSeconds": 142, "service": "VaultGuard PAM API" }
      ```
-2. **Same-Origin Proxy Verification**:
-   - Open browser DevTools Network tab on `https://vaultguard-web.vercel.app`.
-   - Verify requests to `/api/auth/me` return 401 (Unauthenticated) from the same host without CORS errors.
-3. **Authentication & Session**:
-   - Create an initial administrative user via the registration or administrative provisioning workflow.
-   - Verify that logging in sets `vaultguard_token` and `vaultguard_csrf` with `HttpOnly`, `Secure`, `SameSite=Lax`, and `Path=/`.
-4. **Secrets Isolation & Audit Integrity**:
-   - Onboard a test privileged account and retrieve credentials with an approved grant.
-   - Verify that Vault KV v2 receives the secret and the SHA-256 audit ledger passes verification (`GET /api/audit/verify`).
+2. **Readiness Probe (`GET /api/health/ready` or `GET /api/health`)**:
+   - Actively probes MongoDB connectivity (`ping` command) and HashiCorp Vault health (`/v1/sys/health`).
+   - If all dependencies are healthy, returns HTTP 200:
+     ```json
+     {
+       "status": "UP",
+       "check": "readiness",
+       "service": "VaultGuard PAM API",
+       "dependencies": {
+         "database": { "status": "UP", "type": "MongoDB", "connected": true, "latencyMs": 4 },
+         "vault": { "status": "UP", "initialized": true, "sealed": false, "version": "1.15.6", "latencyMs": 7 }
+       }
+     }
+     ```
+   - If MongoDB is disconnected or Vault is sealed/unreachable, **returns HTTP 503 (Service Unavailable)** with honest dependency breakdown so external monitoring alerts immediately.
+
+---
+
+### 10.5 Deployment Verification Matrix
+
+| Verification Area | Local / Preview Status | Production Cloud Status |
+| :--- | :--- | :--- |
+| **Frontend Production Build** | Verified (`tsc && vite build` $\to$ `dist/` 0 errors) | Ready for Vercel deployment |
+| **Backend Production Build** | Verified (`tsc` $\to$ `dist/` 0 errors) | Ready for Vercel deployment |
+| **PAM Integration Suite** | Verified (32 / 32 tests passed) | Functional test suite validated |
+| **Serverless Function Routing** | Verified (`backend/src/handler.ts` + `api/index.ts` handler tests) | Routes, verbs, headers, cookies compatible |
+| **Vault AppRole Lifecycle** | Verified (Token acquisition, KV read/write, renewal, expiry refresh) | Requires remote Vault endpoint with AppRole |
+| **Health Checks (Live vs Ready)** | Verified (200 on healthy; 503 on degraded Vault) | Ready for external uptime monitoring |
+| **Database Connection Caching** | Verified (`global.mongooseCache` prevents connection storms) | Requires MongoDB Atlas SRV URI |
+| **Live Vercel Deployment** | Pending user deployment initiation | Instructions provided below |

@@ -48,11 +48,18 @@ if (isProduction) {
   }
 }
 
-const vaultAppToken = process.env.VAULT_APP_TOKEN;
-if (isProduction && (!vaultAppToken || vaultAppToken.trim() === '')) {
-  throw new Error(
-    'CRITICAL SECURITY CONFIGURATION ERROR: VAULT_APP_TOKEN is mandatory in production. Configure a restricted application token generated with vaultguard-app policy.'
-  );
+const vaultAppToken = process.env.VAULT_APP_TOKEN || '';
+const vaultRoleId = process.env.VAULT_ROLE_ID || '';
+const vaultSecretId = process.env.VAULT_SECRET_ID || '';
+
+if (isProduction) {
+  const hasAppRole = Boolean(vaultRoleId.trim() && vaultSecretId.trim());
+  const hasToken = Boolean(vaultAppToken.trim());
+  if (!hasAppRole && !hasToken) {
+    throw new Error(
+      'CRITICAL SECURITY CONFIGURATION ERROR: Vault authentication is not configured in production. Configure either AppRole credentials (VAULT_ROLE_ID and VAULT_SECRET_ID) or a restricted VAULT_APP_TOKEN.'
+    );
+  }
 }
 
 const corsOrigin = process.env.CORS_ORIGIN;
@@ -70,7 +77,9 @@ export const config = {
   jwtSecret: jwtSecret,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
   vaultAddr: vaultAddr || 'http://127.0.0.1:8200',
-  vaultAppToken: vaultAppToken || '',
+  vaultAppToken: vaultAppToken,
+  vaultRoleId: vaultRoleId,
+  vaultSecretId: vaultSecretId,
   vaultKvMount: process.env.VAULT_KV_MOUNT || 'secret',
   corsOrigin: corsOrigin || 'http://localhost:5173',
   vaultAuditLogPath: process.env.VAULT_AUDIT_LOG_PATH
