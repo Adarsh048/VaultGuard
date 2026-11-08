@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Production build outputs
+dist/
+*/dist/
+build/
+
+# Environment files
+.env
+*/.env
+.env.local
+.env.*.local
+!.env.example
+!*/.env.example
+
+# Binaries & Large Executables (GitHub 100MB file limit)
+bin/
+*.exe
+*.zip
+*.tar
+*.tar.gz
+
+# Logs & Audit files
+*.log
+vault/logs/*
+!vault/logs/.gitkeep
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
